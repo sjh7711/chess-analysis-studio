@@ -1,0 +1,18 @@
+{
+  "name": "chess-review-studio",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Local Korean chess analysis with Stockfish",
+  "license": "GPL-3.0-or-later",
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node --test tests/*.test.mjs",
+    "test:engine": "node scripts/engine-smoke.mjs"
+  },
+  "dependencies": {
+    "chess.js": "1.4.0",
+    "stockfish": "19.0.0"
+  },
+  "engines": { "node": ">=20" }
+}

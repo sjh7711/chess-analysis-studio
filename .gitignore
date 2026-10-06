@@ -1,0 +1,44 @@
+node_modules/
+.pnpm-store/
+*.log
+.DS_Store
+sites/*.tar.gz
+
+# Credentials, local databases and tool state
+.env
+.env.*
+!.env.example
+.dev.vars
+.dev.vars.*
+*.pem
+*.key
+*.sqlite
+*.sqlite3
+*.db
+*.db-wal
+*.db-shm
+.agents/
+.codex/
+.sites-runtime/
+.wrangler/
+/.tools/
+/audio-source/
+
+# Local previews, reports and saved games
+/*.png
+/performance-benchmark.json
+/saved-variation.pgn
+/piece-theme-preview.html
+coverage/
+
+# Keep the application checkout, not the unused starter or deployment archives.
+/sites/*
+!/sites/chess-analysis/
+
+# Generated from the pinned npm dependencies by scripts/package-static.mjs.
+/sites/chess-analysis/public/engine/
+/sites/chess-analysis/public/vendor/chess.js
+/sites/chess-analysis/vendor/chess.js
+
+# Site-specific identity stays local; publish only the configuration example.
+/sites/chess-analysis/.openai/hosting.json

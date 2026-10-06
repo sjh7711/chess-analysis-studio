@@ -1,0 +1,27 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "6",
+      "when": 1791125444705,
+      "tag": "0000_amused_mariko_yashida",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1791127946314,
+      "tag": "0001_puzzling_deathbird",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1791176503525,
+      "tag": "0002_hard_jocasta",
+      "breakpoints": true
+    }
+  ]
+}

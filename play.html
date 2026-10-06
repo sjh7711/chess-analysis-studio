@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#214f3d"><title>친구와 대국 · 체스 분석</title><link rel="stylesheet" href="/online/play.css"><link rel="stylesheet" href="/notifications.css"><link rel="stylesheet" href="/piece-settings.css"><script type="module" src="/online/play.js"></script><script type="module" src="/src/online-nav.js"></script></head>
+<body>
+<header class="play-header"><a class="brand" href="/play">1대1 대국</a><span id="account-label"></span><nav aria-label="주 메뉴"><button id="account-open" class="button outline" hidden>계정 설정</button><button id="piece-settings-open" class="button outline">기물 모양</button><a class="button outline" href="/">기보 분석</a><a class="button outline" href="/play" aria-current="page">1대1 대국</a><button id="invitation-alert-open" class="notification-bell" aria-label="최근 알림 보기" title="최근 알림 보기" aria-haspopup="dialog"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M9 21h6"/></svg></button></nav></header>
+<main class="play-main">
+  <p id="notice" role="status" hidden></p>
+  <section id="login-panel" class="panel auth-panel" hidden>
+    <h2>친구와 대국을 시작하세요</h2><p>닉네임으로 로그인하고 경기 기록을 이어가세요.</p>
+    <div class="auth-tabs" role="group" aria-label="계정 이용 방식"><button type="button" data-auth-mode="login" aria-pressed="true">로그인</button><button type="button" data-auth-mode="signup" aria-pressed="false">회원가입</button></div>
+    <form id="auth-form">
+      <label for="auth-nickname">닉네임</label><input id="auth-nickname" name="username" autocomplete="username" minlength="2" maxlength="20" required placeholder="한글·영문·숫자·_·- / 2~20자" autocapitalize="none" spellcheck="false">
+      <label for="auth-password">비밀번호</label><input id="auth-password" name="password" type="password" autocomplete="current-password" maxlength="128" required>
+      <div id="auth-confirm-wrap" hidden><label for="auth-confirm">비밀번호 확인</label><input id="auth-confirm" type="password" autocomplete="new-password" maxlength="128"></div>
+      <p id="auth-help" class="muted"></p><button id="auth-submit" class="button primary">로그인</button>
+    </form>
+    <p id="auth-message" class="auth-message" role="status" hidden></p>
+    <button id="forgot-password" class="text-button" type="button">비밀번호를 잊으셨나요?</button>
+    <div class="auth-divider"><span>연동한 계정이 있다면</span></div>
+    <button id="chatgpt-login" class="button" type="button">ChatGPT로 로그인</button>
+    <p class="muted">회원가입 후 계정 설정에서 ChatGPT를 연동할 수 있습니다.</p>
+  </section>
+  <div id="lobby" hidden>
+    <section class="identity-bar"><div><strong id="my-name"></strong><span>내 친구 코드</span><code id="my-code"></code></div><button id="copy-code" class="button small">코드 복사</button></section>
+    <div class="lobby-grid">
+      <section class="panel friends-panel"><span class="panel-number">01</span><h2>내 친구 목록</h2><p>시간과 색을 고르고, 친구 이름 옆에서 바로 신청하세요.</p><div class="friend-settings"><label for="friend-color">내 기물 색<select id="friend-color"><option value="random">무작위</option><option value="w">백 · 먼저 두기</option><option value="b">흑 · 나중에 두기</option></select></label><label for="friend-time">대국 시간<select id="friend-time"><option value="10">10분</option><option value="10+5">10+5 · 10분 + 한 수마다 5초</option><option value="15+10">15+10 · 15분 + 한 수마다 10초</option><option value="20">20분</option><option value="30">30분</option><option value="60">60분</option></select></label></div><div id="friends-list" aria-label="저장한 친구"></div><form id="add-friend-form"><label for="friend-code">친구 추가</label><div class="friend-add-row"><input id="friend-code" required placeholder="친구의 12자리 코드" maxlength="20" autocomplete="off"><button class="button">추가</button></div><p class="muted">코드는 처음 추가할 때만 입력하세요. 목록은 내 계정에 저장됩니다.</p></form></section>
+      <section class="panel"><span class="panel-number">02</span><h2>초대 링크로 시작</h2><p>방을 만들고 링크를 보내세요. 친구가 참가하면 바로 시작됩니다.</p><form id="invite-form"><label for="invite-color">내 기물 색</label><select id="invite-color"><option value="random">무작위</option><option value="w">백 · 먼저 두기</option><option value="b">흑 · 나중에 두기</option></select><label for="invite-time">대국 시간</label><select id="invite-time"><option value="10">10분</option><option value="10+5">10+5 · 10분 + 한 수마다 5초</option><option value="15+10">15+10 · 15분 + 한 수마다 10초</option><option value="20">20분</option><option value="30">30분</option><option value="60">60분</option></select><button class="button primary">초대 방 만들기</button></form></section>
+    </div>
+    <section class="panel inbox-panel"><div class="section-title"><h2>대국함</h2><button id="refresh-lobby" class="text-button">새로고침 ↻</button></div><p class="muted">받은 요청과 진행 중인 대국이 여기에 표시됩니다.</p><div id="inbox"></div></section>
+    <section class="panel"><h2>경기 기록</h2><p class="muted">완료된 대국은 자동 저장됩니다. 기보를 내려받거나 바로 분석할 수 있습니다.</p><div id="history"></div><button id="more-history" class="button" hidden>이전 경기 더 보기</button></section>
+  </div>
+  <section id="room" hidden>
+    <div class="room-heading"><button id="back-lobby" class="text-button"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M15 6 9 12 15 18"/></svg><span>대국함으로</span></button><span id="connection-status" role="status">연결 중…</span></div>
+    <div id="join-panel" class="panel" hidden><h2 id="join-title"></h2><p>참가하면 두 사람의 대국이 시작됩니다.</p><button id="join-game" class="button primary">대국 참가</button></div>
+    <div id="game-area" class="game-layout" hidden>
+      <section class="board-column"><div id="opponent-player" class="player-bar"></div><div class="online-board-surface"><div id="online-board" class="online-board" role="grid" aria-label="대국 체스보드"></div></div><div id="self-player" class="player-bar"></div></section>
+      <aside class="room-sidebar">
+        <div class="room-sidebar-content">
+        <section id="waiting-panel" class="panel" hidden><h2>친구를 기다리고 있어요</h2><p id="waiting-text"></p><div id="invite-link-wrap" hidden><label for="invite-link">초대 링크</label><input id="invite-link" readonly><button id="copy-link" class="button primary">초대 링크 복사</button></div><button id="cancel-invite" class="text-button danger">초대 취소</button></section>
+        <section id="result-panel" class="panel result-panel" hidden><p class="eyebrow">대국 종료</p><h2 id="result-title"></h2><p id="result-reason"></p><a id="analyze-game-link" class="button primary">이 경기 분석하기</a><button id="show-result" class="button">결과 다시 보기</button><button id="download-pgn" class="button">PGN 저장</button><p class="muted">경기 기록에 자동 저장되었습니다.</p></section>
+        <section class="panel move-mode-panel">
+          <div id="turn-caption" class="turn-caption" role="status"></div>
+          <div class="move-mode-heading"><h2>기물 두는 방식</h2><button id="move-sound" class="sound-toggle" type="button" aria-pressed="true" aria-label="기물 이동 소리 끄기"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M11 5 6 9H3v6h3l5 4Z"/><path class="sound-waves" d="M15 8a6 6 0 0 1 0 8M18 5a10 10 0 0 1 0 14"/><path class="sound-muted" d="m16 9 6 6m0-6-6 6"/></svg><span class="sound-label">소리 켜짐</span></button></div>
+          <div id="move-mode" class="move-mode-buttons" role="group" aria-label="기물 두는 방식"><button type="button" data-move-mode="direct" aria-pressed="false">즉시 두기</button><button type="button" data-move-mode="confirm" aria-pressed="false">놓기 전 확인</button></div>
+          <div class="annotation-tools" role="group" aria-label="체스판 도구"><button id="annotation-mode" aria-pressed="false" title="나에게만 표시 · 드래그로 화살표, 탭으로 칸 강조">표기 모드</button><button id="annotation-clear" disabled>표기 지우기</button><button id="flip-board" title="체스판 방향 바꾸기"><span>판 뒤집기</span><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M8 20V4M4 8l4-4 4 4M16 4v16M12 16l4 4 4-4"/></svg></button></div>
+        </section>
+        <section id="pending-panel" class="panel pending-panel" hidden><h3>이 위치에 둘까요?</h3><p id="pending-description"></p><div class="button-row"><button id="confirm-move" class="button primary">두기</button><button id="cancel-move" class="button">취소</button></div></section>
+        <section id="request-panel" class="panel pending-panel" hidden><h3 id="request-title"></h3><p id="request-description"></p><div id="request-response" class="button-row"><button id="accept-request" class="button primary">수락</button><button id="decline-request" class="button">거절</button></div><button id="withdraw-request" class="text-button" hidden>요청 취소</button></section>
+        <section class="panel history-panel"><h2>기보</h2><div class="history-navigation"><button id="history-first" aria-label="처음 국면" title="처음 국면"><svg class="navigation-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 6 6 12 12 18M18 6 12 12 18 18"/></svg></button><button id="history-prev" aria-label="이전 기록" title="이전 기록 · 왼쪽 방향키"><svg class="navigation-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M15 6 9 12 15 18"/></svg></button><span id="history-position" role="status"></span><button id="history-next" aria-label="다음 기록" title="다음 기록 · 오른쪽 방향키"><svg class="navigation-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M9 6 15 12 9 18"/></svg></button><button id="history-last" aria-label="현재 대국의 최신 국면" title="현재 대국의 최신 국면"><svg class="navigation-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 6 12 12 6 18M12 6 18 12 12 18"/></svg></button></div><div id="online-history" class="online-history" aria-label="대국 기보"></div></section>
+        </div>
+        <section id="game-actions" class="game-actions"><button id="offer-undo" class="button request-button">한 수 무르기 요청</button><button id="offer-draw" class="button request-button">무승부 요청</button><button id="resign-game" class="button danger">기권</button></section>
+      </aside>
+    </div>
+  </section>
+</main>
+<dialog id="account-dialog" class="account-dialog" aria-labelledby="account-title">
+  <div class="account-dialog-heading"><h2 id="account-title">계정 설정</h2><button id="account-close" class="button small" aria-label="계정 설정 닫기">닫기</button></div>
+  <p class="account-identity"><strong id="account-name"></strong><span>닉네임 · 로그인 ID</span></p>
+  <p id="account-message" class="auth-message" role="status" hidden></p>
+  <section class="account-section"><h3>ChatGPT 연동</h3><p id="chatgpt-link-status"></p><button id="chatgpt-link-start" class="button">ChatGPT 계정 연동</button>
+    <div id="chatgpt-link-confirm" class="link-confirm" hidden><p id="chatgpt-link-label"></p><form id="chatgpt-link-form"><label for="link-password">닉네임 계정의 비밀번호</label><input id="link-password" type="password" autocomplete="current-password" required maxlength="128"><div class="button-row"><button class="button primary">이 계정에 연동</button><button id="chatgpt-link-cancel" type="button" class="button">취소</button></div></form></div>
+    <form id="chatgpt-unlink-form" hidden><label for="unlink-password">연동 해제 시 현재 비밀번호 확인</label><input id="unlink-password" type="password" autocomplete="current-password" required maxlength="128"><button class="button">ChatGPT 연동 해제</button></form>
+  </section>
+  <section class="account-section"><h3>비밀번호 변경</h3><form id="password-form"><div id="password-current-wrap"><label for="password-current">현재 비밀번호</label><input id="password-current" type="password" autocomplete="current-password" required maxlength="128"></div><label for="password-new">새 비밀번호</label><input id="password-new" type="password" autocomplete="new-password" required minlength="8" maxlength="128" placeholder="8~128자"><label for="password-confirm">새 비밀번호 확인</label><input id="password-confirm" type="password" autocomplete="new-password" required minlength="8" maxlength="128"><p id="password-help" class="muted"></p><button class="button primary">비밀번호 변경</button></form></section>
+  <button id="account-logout" class="button account-logout">로그아웃</button>
+</dialog>
+<dialog id="game-result-dialog" class="game-result-dialog" aria-labelledby="game-result-title" aria-describedby="game-result-reason">
+  <button id="close-result" class="result-close" aria-label="결과 닫기"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
+  <div class="result-hero">
+    <p class="result-kicker">대국 종료</p>
+    <div id="game-result-emblem" class="result-emblem" aria-hidden="true"></div>
+    <h2 id="game-result-title" tabindex="-1" autofocus></h2>
+    <p id="game-result-reason" class="result-reason"></p>
+  </div>
+  <div class="result-body">
+    <div class="result-scoreboard" aria-label="최종 대국 결과">
+      <div class="result-player"><span class="result-side">백</span><strong id="result-white-name"></strong><span id="result-white-score" class="result-score"></span></div>
+      <span class="result-versus" aria-hidden="true">:</span>
+      <div class="result-player"><span class="result-side">흑</span><strong id="result-black-name"></strong><span id="result-black-score" class="result-score"></span></div>
+    </div>
+    <a id="result-analyze-link" class="button primary" href="/">이 경기 분석하기</a>
+    <button id="review-finished-game" class="button">기보 살펴보기</button>
+    <p class="result-saved">경기 기록에 저장되었습니다.</p>
+  </div>
+</dialog>
+<dialog id="promotion-dialog"><h2>어떤 기물로 승격할까요?</h2><div id="promotion-options" class="promotion-options"><button data-promotion="q">퀸</button><button data-promotion="r">룩</button><button data-promotion="b">비숍</button><button data-promotion="n">나이트</button></div><button id="promotion-cancel" class="text-button">취소</button></dialog>
+<dialog id="action-dialog"><h2 id="action-title"></h2><p id="action-description"></p><div class="button-row"><button id="action-confirm" class="button primary">확인</button><button id="action-cancel" class="button">취소</button></div></dialog>
+</body></html>

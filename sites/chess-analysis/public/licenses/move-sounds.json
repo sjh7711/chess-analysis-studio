@@ -1,0 +1,29 @@
+{
+  "title": "chess pieces.wav",
+  "author": "simone_ds",
+  "source": "https://freesound.org/people/simone_ds/sounds/366065/",
+  "download": "https://cdn.freesound.org/previews/366/366065_6040409-hq.mp3",
+  "license": "CC0 1.0",
+  "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+  "changes": "Selected impacts trimmed, converted to mono 48 kHz 16-bit PCM WAV; 2 ms fade-in and 15 ms fade-out. No pitch or timbre processing.",
+  "clips": [
+    {
+      "file": "chess-move.wav",
+      "source_start_seconds": 12.200291666666667,
+      "source_end_seconds": 12.440291666666667,
+      "impact_seconds": 12.206291666666667,
+      "duration": 0.24,
+      "peak": 0.5208237171173096,
+      "sha256": "cb468b0030126e08ba5ef097393b2ecee4259b82280f3d7166a0de3ad0e18d71"
+    },
+    {
+      "file": "chess-capture.wav",
+      "source_start_seconds": 18.71425,
+      "source_end_seconds": 18.99425,
+      "impact_seconds": 18.72025,
+      "duration": 0.28,
+      "peak": 0.6570740938186646,
+      "sha256": "bcd50d0cfdc926a9751aa00d888ff9525c7faa7306643fe7f35b860bb34e1205"
+    }
+  ]
+}
