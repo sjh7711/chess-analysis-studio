@@ -34,6 +34,7 @@ const accountUI=mountAccount({api,onSignedIn:applyAccount,onSignedOut:resetAccou
 function resetAccount(){
   clearTimeout(pollTimer);cleanupDrag();me=null;game=null;pending=null;selected=null;rendered=null;boardKey='';olderGames=[];latestGames=[];renderedFriends='';
   $('room').hidden=true;$('lobby').hidden=true;$('login-panel').hidden=false;$('account-label').textContent='';$('online-board').replaceChildren();$('online-history').replaceChildren();
+  scheduleGameLayout();
   for(const dialog of document.querySelectorAll('dialog[open]'))dialog.close();accountUI.update(null);
 }
 async function applyAccount(data){
@@ -101,7 +102,7 @@ function renderFriends(friends=[]){
   const html=friends.length?friends.map(friend=>`<article class="friend-row"><span class="friend-avatar" aria-hidden="true">♟</span><strong>${esc(friend.nickname)}</strong><button class="button primary small" data-friend="${esc(friend.friendCode)}" aria-label="${esc(friend.nickname)}님에게 대국 신청">대국 신청</button><button class="friend-remove" data-remove-friend="${esc(friend.friendCode)}" data-name="${esc(friend.nickname)}" aria-label="${esc(friend.nickname)}님을 친구 목록에서 제거" title="목록에서 제거"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 6l12 12M18 6 6 18"/></svg></button></article>`).join(''):'<p class="empty">친구를 추가하면 여기서 바로 대국을 신청할 수 있습니다.</p>';
   if(renderedFriends!==html){renderedFriends=html;$('friends-list').innerHTML=html;}
 }
-function renderLobby(games){$('lobby').hidden=false;$('room').hidden=true;const active=games.filter(g=>['waiting','active'].includes(g.status)),done=[...new Map([...games.filter(g=>g.status==='finished'),...olderGames].map(g=>[g.id,g])).values()];$('inbox').innerHTML=active.length?active.map(rowMarkup).join(''):'<p class="empty">아직 요청이 없습니다. 친구와 첫 대국을 시작해 보세요.</p>';$('history').innerHTML=done.length?done.map(rowMarkup).join(''):'<p class="empty">대국을 마치면 경기 기록이 여기에 남습니다.</p>';$('more-history').hidden=!historyCursor;}
+function renderLobby(games){$('lobby').hidden=false;$('room').hidden=true;const active=games.filter(g=>['waiting','active'].includes(g.status)),done=[...new Map([...games.filter(g=>g.status==='finished'),...olderGames].map(g=>[g.id,g])).values()];$('inbox').innerHTML=active.length?active.map(rowMarkup).join(''):'<p class="empty">아직 요청이 없습니다. 친구와 첫 대국을 시작해 보세요.</p>';$('history').innerHTML=done.length?done.map(rowMarkup).join(''):'<p class="empty">대국을 마치면 경기 기록이 여기에 남습니다.</p>';$('more-history').hidden=!historyCursor;scheduleGameLayout();}
 function playerMarkup(name,color,captured,material){
   const side=color==='w'?'백':'흑',advantage=material[color]-material[color==='w'?'b':'w'];
   return `<div class="player-info"><strong>${esc(name)}</strong><span>${side}${color===game.color?' · 나':''}</span><span class="material-score" data-material="${color}" aria-label="${side} 기물 점수 ${material[color]}점${advantage>0?`, ${advantage}점 우세`:''}" title="남은 기물의 합계 · 폰 1, 나이트·비숍 3, 룩 5, 퀸 9점 · 킹 제외">기물 ${material[color]}점${advantage>0?` (+${advantage})`:''}</span>${capturedMarkup(captured[color],color)}</div><time data-clock="${color}" aria-label="${side} 남은 시간"></time>`;
@@ -242,23 +243,54 @@ function cleanupDrag(){const previous=drag;drag=null;previous?.node?.remove();fo
 window.addEventListener('popstate',()=>{$('game-result-dialog').close();roomId=new URL(location.href).searchParams.get('room');game=null;pending=null;rendered=null;inviteToken=new URLSearchParams(location.hash.slice(1)).get('invite')||'';void refresh();});
 document.addEventListener('visibilitychange',()=>{if(document.hidden)cancelDrag();else void refresh();});window.addEventListener('pagehide',()=>{clearTimeout(pollTimer);cleanupDrag();});
 window.addEventListener('invitations-changed',()=>{void refresh();});
-let layoutFrame;
+let layoutFrame,mobileControls=false;
+const mobileControlHomes=[['turn-caption','mobile-turn-slot'],['move-sound','mobile-tool-extras'],['piece-settings-open','mobile-tool-extras'],['account-open','mobile-tool-extras']].map(([id,target])=>{
+  const node=$(id),anchor=document.createComment(id+' desktop position');node.before(anchor);return{node,anchor,target:$(target)};
+});
+function setBoardTools(open,focus=false){
+  $('board-tools').classList.toggle('is-open',open);
+  $('board-tools-toggle').setAttribute('aria-expanded',String(open));
+  $('board-tools-toggle').setAttribute('aria-label',open?'체스판 도구 닫기':'체스판 도구 열기');
+  if(focus)$('board-tools-toggle').focus({preventScroll:true});
+}
+$('board-tools-toggle').onclick=()=>setBoardTools($('board-tools-toggle').getAttribute('aria-expanded')!=='true');
+document.addEventListener('pointerdown',event=>{if(mobileControls&&!event.target.closest('#board-tools,#board-tools-toggle'))setBoardTools(false);});
+document.addEventListener('keydown',event=>{if(event.key==='Escape'&&mobileControls&&$('board-tools').classList.contains('is-open')){setBoardTools(false,true);event.preventDefault();}});
+function syncMobileControls(){
+  const mobile=matchMedia('(max-width:700px)').matches&&!$('game-area').hidden&&!$('room').hidden;
+  if(mobile===mobileControls)return;
+  mobileControls=mobile;document.body.classList.toggle('mobile-game',mobile);setBoardTools(false);
+  for(const {node,anchor,target}of mobileControlHomes){if(mobile)target.append(node);else anchor.after(node);}
+}
+function syncHistoryScroll(){
+  const list=$('online-history');
+  if(!mobileControls){if(reviewPly===null)list.scrollTop=list.scrollHeight;return;}
+  if(reviewPly===null){list.scrollLeft=list.scrollWidth;return;}
+  const current=list.querySelector('[aria-current="step"]');if(!current){list.scrollLeft=0;return;}
+  const item=current.getBoundingClientRect(),bounds=list.getBoundingClientRect();
+  if(item.left<bounds.left)list.scrollLeft-=bounds.left-item.left+6;else if(item.right>bounds.right)list.scrollLeft+=item.right-bounds.right+6;
+}
 function scheduleGameLayout(){cancelAnimationFrame(layoutFrame);layoutFrame=requestAnimationFrame(fitGameLayout);}
 function fitGameLayout(){
+  syncMobileControls();
   const area=$('game-area');if(area.hidden||$('room').hidden)return;
   const main=document.querySelector('.play-main'),style=getComputedStyle(main);
   const availableWidth=main.clientWidth-parseFloat(style.paddingLeft)-parseFloat(style.paddingRight);
-  const availableHeight=Math.max(0,Math.floor((window.visualViewport?.height||innerHeight)-(area.getBoundingClientRect().top+scrollY)-24));
-  const stacked=matchMedia('(max-width:700px)').matches,gap=stacked?10:20;
+  const availableHeight=Math.max(0,Math.floor((window.visualViewport?.height||innerHeight)-(area.getBoundingClientRect().top+scrollY)-parseFloat(style.paddingBottom)));
+  const stacked=mobileControls,gap=stacked?8:20;
   const sidebarWidth=stacked?availableWidth:Math.min(360,Math.max(280,availableWidth*.3));
   const playerHeight=$('opponent-player').offsetHeight+$('self-player').offsetHeight;
-  const controlsHeight=stacked?Math.min(350,availableHeight*.52):0;
+  const content=document.querySelector('.room-sidebar-content'),sidebar=document.querySelector('.room-sidebar');
+  const visible=stacked?[...content.children].filter(node=>!node.hidden&&getComputedStyle(node).display!=='none'):[];
+  const contentHeight=visible.reduce((sum,node)=>sum+node.offsetHeight,0)+Math.max(0,visible.length-1)*parseFloat(getComputedStyle(content).gap);
+  const actionsHeight=$('game-actions').hidden?0:$('game-actions').offsetHeight+parseFloat(getComputedStyle(sidebar).gap);
+  const controlsHeight=stacked?contentHeight+actionsHeight:0;
   const boardSize=Math.max(0,Math.floor(Math.min(stacked?availableWidth:availableWidth-sidebarWidth-gap,availableHeight-playerHeight-(stacked?controlsHeight+gap:0))));
   area.style.setProperty('--game-height',availableHeight+'px');
   area.style.setProperty('--board-size',boardSize+'px');
   area.style.setProperty('--sidebar-width',sidebarWidth+'px');
   area.style.setProperty('--room-width',(stacked?availableWidth:boardSize+sidebarWidth+gap)+'px');
-  if(reviewPly===null)$('online-history').scrollTop=$('online-history').scrollHeight;
+  syncHistoryScroll();
 }
 const layoutObserver=new ResizeObserver(scheduleGameLayout);
 for(const element of [document.querySelector('.play-main'),document.querySelector('.play-header'),document.querySelector('.room-heading'),$('notice'),$('opponent-player'),$('self-player')])layoutObserver.observe(element);
