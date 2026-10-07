@@ -43,6 +43,30 @@ test('checkmate and stalemate have correct terminal evaluation', () => {
   const stalemate = terminalResult(new Chess('7k/5Q2/6K1/8/8/8/8/8 b - - 0 1'));
   assert.equal(stalemate.score.value,0); assert.match(stalemate.terminal,/스테일메이트/);
 });
+
+test('display perspective reverses centipawns and mates without changing engine scores or PGN', () => {
+  const scores = [
+    [{type:'cp',value:133}, '+1.33', '-1.33'],
+    [{type:'cp',value:-245}, '-2.45', '+2.45'],
+    [{type:'cp',value:0}, '0.00', '0.00'],
+    [{type:'mate',value:3,winner:'w'}, '+M3', '−M3'],
+    [{type:'mate',value:-2,winner:'b'}, '−M2', '+M2'],
+    [{type:'mate',value:0,winner:'w'}, '+M0', '−M0'],
+    [{type:'mate',value:0,winner:'b'}, '−M0', '+M0'],
+  ];
+  assert.equal(formatScore(null,'b'),'—');
+  for (const [score,white,black] of scores) {
+    const original = structuredClone(score);
+    Object.freeze(score);
+    assert.equal(formatScore(score),white);
+    assert.equal(formatScore(score,'b'),black);
+    assert.equal(scoreValue(score,'b'),-scoreValue(score));
+    assert.deepEqual(score,original);
+  }
+  const game = parseGame('1. e4 e5 *');
+  const results = new Map([[2,{score:scores[1][0],depth:16}]]);
+  assert.match(exportPgn(game,results),/\[%eval -2.45\]/);
+});
 test('repetition context is sent to engine and terminal detection retains history', () => {
   const game = parseGame('1. Nf3 Nf6 2. Ng1 Ng8 3. Nf3 Nf6 4. Ng1 Ng8 *');
   const chess = gameAt(game,8);

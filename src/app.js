@@ -58,6 +58,11 @@ function toast(message, error = false) {
   toastTimer = setTimeout(() => { $('toast').hidden = true; }, 4200);
 }
 function currentChess() { return state.line ? state.line.position() : gameAt(state.game, state.index); }
+function evaluationColor() { return state.flipped ? 'b' : 'w'; }
+function evaluationSide() { return state.flipped ? '흑' : '백'; }
+function displayScore(score) { return formatScore(score, evaluationColor()); }
+function displayValue(score) { return scoreValue(score, evaluationColor()); }
+function evaluationHint() { return `${evaluationSide()} 기준 (+ ${evaluationSide()} 우세, − ${state.flipped ? '백' : '흑'} 우세)`; }
 function currentResult() { return state.line ? state.line.results.get(state.line.cursor) : state.results.get(state.index); }
 function gradeAt(index) { return classifyMove(state.results.get(index-1),state.results.get(index),state.game.moves[index-1],{previous:state.results.get(index-2)}); }
 function shownResult() { return state.editor ? null : currentResult() || (state.preview?.fen === currentChess().fen() ? state.preview : null); }
@@ -307,10 +312,15 @@ function renderAnalysis() {
   renderCoach();
   $('arrow-label').textContent=state.line?.kind==='pv'?'다음 재생 수 표시':'추천 수 표시';
   $('show-arrow').setAttribute('aria-label',$('arrow-label').textContent);
-  $('rail-score').textContent = formatScore(result?.score);
-  const value = result?.score ? scoreValue(result.score) : 0;
+  $('evaluation-basis').textContent = `평가 · ${evaluationSide()} 기준`;
+  $('rail-score').textContent = displayScore(result?.score);
+  const rail = $('eval-fill').parentElement;
+  rail.classList.toggle('flipped',state.flipped);
+  rail.setAttribute('aria-label',`${evaluationHint()} · ${displayScore(result?.score)}`);
+  rail.title = evaluationHint();
+  const value = result?.score ? displayValue(result.score) : 0;
   $('eval-fill').style.height = `${100 / (1 + Math.exp(-Math.max(-2000,Math.min(2000,value))/230))}%`;
-  $('rail-score').style.color = value < -180 ? '#f6f7ed' : '#496049';
+  $('rail-score').style.color = (value < -180) !== state.flipped ? '#f6f7ed' : '#496049';
   const complete = [...state.results.values()].filter(isCached).length;
   $('analyze-game').textContent = state.mode === 'full' ? '분석 중단' : `${state.game.moves.length ? (complete === state.game.positions.length ? '전체 대국 다시 분석' : complete > 0 ? '남은 대국 분석' : '전체 대국 분석') : '현재 국면 분석'}`;
   $('depth').disabled = state.mode === 'full' || !!state.editor;
@@ -338,9 +348,9 @@ function renderAnalysis() {
       const notation = `${number}${move.color === 'w' ? '.' : '...'} ${move.san}`;
       const replyText = reply ? `${reply.color === 'w' ? '백' : '흑'} 응수 ${reply.san}` : notation;
       const moveLabel = `${PIECE_NAMES[move.piece]} ${move.from} ${move.captured ? '×' : '→'} ${move.to}${move.promotion ? ` · ${PIECE_NAMES[move.promotion]} 승격` : ''}`;
-      const score = formatScore(line.score);
+      const score = displayScore(line.score);
       const squares = `${move.from} ${move.captured ? '×' : '→'} ${move.to}${move.promotion ? `=${move.promotion.toUpperCase()}` : ''}`;
-      return `<button class="pv-row${i === 0 ? ' pv-best' : ''}" data-pv="${i}" aria-label="${escape(`${i+1}순위 ${move.color === 'w' ? '백' : '흑'} ${moveLabel}, 백 기준 평가 ${score}, 전체 예상 수순 탐색`)}" title="${escape(`${moveLabel} · ${pvToSan(fen,line.pv)}`)} · 깊이 ${line.depth}"><span class="pv-number">${i+1}</span><span class="pv-score">${score}</span><span class="pv-move"><span class="pv-piece">${pieceSvg(move.piece,move.color)}</span><strong>${escape(squares)}</strong></span><span class="pv-reply">${escape(replyText)}</span><span class="pv-play">전체 수순 보기</span></button>`;
+      return `<button class="pv-row${i === 0 ? ' pv-best' : ''}" data-pv="${i}" aria-label="${escape(`${i+1}순위 ${move.color === 'w' ? '백' : '흑'} ${moveLabel}, ${evaluationSide()} 기준 평가 ${score}, 전체 예상 수순 탐색`)}" title="${escape(`${moveLabel} · ${pvToSan(fen,line.pv)}`)} · 깊이 ${line.depth}"><span class="pv-number">${i+1}</span><span class="pv-score">${score}</span><span class="pv-move"><span class="pv-piece">${pieceSvg(move.piece,move.color)}</span><strong>${escape(squares)}</strong></span><span class="pv-reply">${escape(replyText)}</span><span class="pv-play">전체 수순 보기</span></button>`;
     }).join('');
   } else $('pv-lines').innerHTML = `<p class="empty-text">${escape(result?.terminal || (state.mode === 'full' ? '이 국면의 분석 차례를 기다리고 있습니다.' : state.error || '분석 중…'))}</p>`;
   renderArrow();
@@ -364,7 +374,7 @@ function renderMoves(scroll = false) {
     const { move,index } = item;
     const grade = gradeAt(index);
     const badge = grade && grade.key !== 'good' ? `<span class="move-badge ${grade.key}" title="${grade.label}">${grade.symbol}</span>` : '';
-    return `<button data-index="${index}" class="move-button${state.index === index ? ' current' : ''}" aria-label="${escape(`${move.before.split(' ')[5]}${move.color === 'w' ? '. 백' : '... 흑'} ${move.san}${grade ? ` ${grade.label}` : ''}`)}" aria-current="${state.index === index ? 'step' : 'false'}"><span>${escape(move.san)}</span>${badge}<span class="move-score" title="${state.results.has(index)?'이 수를 둔 뒤의 평가 · 백 기준 (+ 백 우세, − 흑 우세)':'아직 분석되지 않은 국면'}">${formatScore(state.results.get(index)?.score)}</span></button>`;
+    return `<button data-index="${index}" class="move-button${state.index === index ? ' current' : ''}" aria-label="${escape(`${move.before.split(' ')[5]}${move.color === 'w' ? '. 백' : '... 흑'} ${move.san}${grade ? ` ${grade.label}` : ''}`)}" aria-current="${state.index === index ? 'step' : 'false'}"><span>${escape(move.san)}</span>${badge}<span class="move-score" title="${state.results.has(index)?`이 수를 둔 뒤의 평가 · ${evaluationHint()}`:'아직 분석되지 않은 국면'}">${displayScore(state.results.get(index)?.score)}</span></button>`;
   };
   $('move-filter-count').textContent=`${visible}개`;
   $('move-list').innerHTML = [...rows].map(([number,row]) => `<div class="move-row"><span class="move-number">${number}.</span>${cell(row.w)}${cell(row.b)}</div>`).join('') || `<p class="empty-text">${state.game.moves.length?'조건에 맞는 분석된 수가 없습니다.':'FEN 국면입니다. 보드에서 직접 수를 두어 탐색하세요.'}</p>`;
@@ -421,10 +431,10 @@ function setInsightContent(markup) {
   $('insight-content').scrollTop = 0;
 }
 
-function renderInsightDetail({game,index,insight}) {
+function renderInsightDetail({game,index,insight,before,after}) {
   const move = game.moves[index-1];
   $('insight-title').textContent = `${moveLabel(move)} · ${insight.grade.label}`;
-  $('insight-evaluation').textContent = `${insight.lossText} · ${insight.evaluation}`;
+  $('insight-evaluation').textContent = `${insight.lossText} · 수 전 ${displayScore(before.score)} → 수 후 ${displayScore(after.score)} (${evaluationSide()} 기준)`;
   $('insight-playback').textContent = state.line ? `${state.line.title} · ${state.line.cursor} / ${state.line.steps.length}` : '';
   const section = (kind,title,line,fact) => {
     const selected = state.line?.reviewIndex === index && state.line.reviewKind === kind;
@@ -455,13 +465,17 @@ function renderChart() {
   const count = branch ? branch.steps.length+1 : state.game.positions.length;
   $('chart-start').textContent = branch ? '탐색 시작' : '시작';
   $('chart-last').textContent = branch ? `${branch.steps.length}번 이동` : state.game.moves.length ? `${state.game.moves.length}번 이동` : '현재 국면';
-  $('chart-status').textContent = `백 기준 · ${state.editor ? '배치 편집 중' : state.mode==='full' ? '전체 대국 분석 중' : results.size===count ? '분석 완료' : `${results.size}/${count} 국면 분석`}`;
-  $('chart-current-score').textContent = formatScore(results.get(cursor)?.score);
+  $('chart-status').textContent = `${evaluationSide()} 기준 · ${state.editor ? '배치 편집 중' : state.mode==='full' ? '전체 대국 분석 중' : results.size===count ? '분석 완료' : `${results.size}/${count} 국면 분석`}`;
+  $('chart-status').title = evaluationHint();
+  $('chart-top-label').textContent = `${evaluationSide()} 우세`;
+  $('chart-bottom-label').textContent = `${state.flipped ? '백' : '흑'} 우세`;
+  $('chart-current-score').textContent = displayScore(results.get(cursor)?.score);
+  $('chart-current-score').title = evaluationHint();
   $('eval-chart').setAttribute('aria-valuemax',String(count-1));
   $('eval-chart').setAttribute('aria-valuenow',String(cursor));
   $('eval-chart').setAttribute('aria-valuetext',`${branch?'탐색 수순':'원본 대국'} · ${cursor} / ${count-1}번 이동`);
   const x = index => count === 1 ? 300 : index/(count-1)*600;
-  const y = score => 64-Math.tanh(scoreValue(score)/420)*55;
+  const y = score => 64-Math.tanh(displayValue(score)/420)*55;
   let svg = '<line x1="0" y1="64" x2="600" y2="64" stroke="#c6d1bc" stroke-width="1" stroke-dasharray="4 4"/>';
   let points = [];
   const flush = () => {
@@ -727,7 +741,7 @@ function renderStudy() {
     if (!rows.has(number)) rows.set(number,{w:null,b:null});
     rows.get(number)[step.color] = {step,index:i+1};
   });
-  const cell = item => item ? `<button data-step="${item.index}" class="move-button${line.cursor===item.index?' current':''}" aria-current="${line.cursor===item.index?'step':'false'}" aria-label="${escape(`${item.step.before.split(' ')[5]}${item.step.color==='w'?'. 백':'... 흑'} ${item.step.san}`)}"><span>${escape(item.step.san)}</span><span class="move-score" title="${line.results.has(item.index)?'이 수를 둔 뒤의 평가 · 백 기준':'아직 분석되지 않은 국면'}">${formatScore(line.results.get(item.index)?.score)}</span></button>` : '<span></span>';
+  const cell = item => item ? `<button data-step="${item.index}" class="move-button${line.cursor===item.index?' current':''}" aria-current="${line.cursor===item.index?'step':'false'}" aria-label="${escape(`${item.step.before.split(' ')[5]}${item.step.color==='w'?'. 백':'... 흑'} ${item.step.san}`)}"><span>${escape(item.step.san)}</span><span class="move-score" title="${line.results.has(item.index)?`이 수를 둔 뒤의 평가 · ${evaluationHint()}`:'아직 분석되지 않은 국면'}">${displayScore(line.results.get(item.index)?.score)}</span></button>` : '<span></span>';
   list.innerHTML = `<button data-step="0" class="study-start${line.cursor===0?' current':''}">${escape(line.startLabel || '시작 국면')}</button>` + [...rows].map(([number,row])=>`<div class="move-row"><span class="move-number">${number}.</span>${cell(row.w)}${cell(row.b)}</div>`).join('');
   list.scrollTop = previousScroll;
   if (list.dataset.cursor !== String(line.cursor)) revealStudyMove();
@@ -810,7 +824,7 @@ $('first').onclick = () => state.line ? seekLine(0) : navigate(0);
 $('prev').onclick = () => stepBoard(-1);
 $('next').onclick = () => stepBoard(1);
 $('last').onclick = () => state.line ? seekLine(state.line.steps.length) : navigate(state.game.moves.length);
-$('flip').onclick = () => { stepNavigation.cancel(); state.flipped = !state.flipped; renderBoard(); };
+$('flip').onclick = () => { stepNavigation.cancel(); state.flipped = !state.flipped; renderAll(); };
 $('show-arrow').onchange = renderArrow;
 $('variation-return').onclick = () => navigate(state.index);
 $('analyze-position').onclick = () => analyzeCurrent(true);

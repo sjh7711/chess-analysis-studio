@@ -80,15 +80,18 @@ export function terminalResult(chess) {
   return { score, depth: 0, lines: [], bestmove: null, terminal: label };
 }
 
-export function scoreValue(score) {
-  if (score.type === 'cp') return score.value;
-  return (score.winner ? score.winner === 'w' : score.value > 0) ? 100000 - Math.abs(score.value) : -100000 + Math.abs(score.value);
+// Engine results and PGN annotations stay white-relative; perspective only changes presentation.
+export function scoreValue(score, perspective = 'w') {
+  const sign = perspective === 'b' ? -1 : 1;
+  if (score.type === 'cp') return score.value * sign;
+  return sign * ((score.winner ? score.winner === 'w' : score.value > 0) ? 100000 - Math.abs(score.value) : -100000 + Math.abs(score.value));
 }
 
-export function formatScore(score) {
+export function formatScore(score, perspective = 'w') {
   if (!score) return '—';
-  if (score.type === 'mate') return `${scoreValue(score) > 0 ? '+' : '−'}M${Math.abs(score.value)}`;
-  return `${score.value > 0 ? '+' : ''}${(score.value / 100).toFixed(2)}`;
+  const value = scoreValue(score, perspective);
+  if (score.type === 'mate') return `${value > 0 ? '+' : '−'}M${Math.abs(score.value)}`;
+  return `${value > 0 ? '+' : ''}${(value / 100).toFixed(2)}`;
 }
 
 export function scoreSummary(result) {
