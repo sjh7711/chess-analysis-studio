@@ -474,7 +474,7 @@ main{width:100%;flex:none;padding-bottom:24px}
 .import-tabs input,.arrow-option input,.completion-sound input{margin:0;flex:none}
 .editor-palette button,#promotion-options button{display:grid;place-items:center;padding:0;flex-shrink:0}
 .moves-card .moves-table-header{padding-left:21px;padding-right:21px;column-gap:0}
-.moves-card .moves-table-header span:nth-child(n+2){padding-left:8px}
+.moves-card .moves-table-header span:nth-child(n+2){padding-left:8px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .moves-card .study-table-header{padding-left:10px;padding-right:10px;column-gap:0}
 .moves-card .study-table-header span:nth-child(n+2){padding-left:9px}
 .moves-card .move-row{column-gap:0}

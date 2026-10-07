@@ -200,6 +200,12 @@ async function analyzeGame(restart = false) {
 
 function renderGame() {
   const h = state.game.headers;
+  for (const [id, side, label] of [['moves-white-header', 'White', '백'], ['moves-black-header', 'Black', '흑']]) {
+    const name = h[side]?.trim();
+    const heading = name && name !== '?' ? `${label} · ${name}` : label;
+    $(id).textContent = heading;
+    $(id).title = heading;
+  }
   $('game-title').innerHTML = `${escape(h.White || '백')} <span>vs</span> ${escape(h.Black || '흑')}`;
   const tc = /^\d+$/.test(h.TimeControl) ? `${Number(h.TimeControl)/60}분` : h.TimeControl?.includes('+') ? `${h.TimeControl.split('+')[0]/60}분 + ${h.TimeControl.split('+')[1]}초` : null;
   $('game-meta').textContent = [h.Site === '?' ? null : h.Site, h.Date === '????.??.??' ? null : h.Date, tc, state.game.kind === 'fen' ? 'FEN 국면 분석' : `${state.game.moves.length}번 이동`].filter(Boolean).join(' · ');
