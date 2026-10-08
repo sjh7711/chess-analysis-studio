@@ -13,6 +13,7 @@ const types = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; ch
 const files = new Map([
   ['/', 'index.html'], ['/index.html', 'index.html'], ['/styles.css', 'styles.css'],
   ['/notifications.css', 'notifications.css'], ['/piece-settings.css', 'piece-settings.css'],
+  ['/theme.css', 'theme.css'], ['/src/theme.js', 'src/theme.js'],
   ['/src/move-sounds.js', 'src/move-sounds.js'],
   ['/sounds/chess-move.wav', 'sounds/chess-move.wav'],
   ['/sounds/chess-capture.wav', 'sounds/chess-capture.wav'],

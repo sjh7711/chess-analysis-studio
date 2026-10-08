@@ -6,11 +6,12 @@ import { engineChunks } from '../src/engine-options.js';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const site = path.join(root, 'sites', 'chess-analysis');
 const dist = path.join(site, 'public');
-const modules = ['annotations', 'app', 'bootstrap', 'chess-core', 'completion-alerts', 'engine', 'engine-options', 'insight', 'move-sounds', 'notification-center', 'opening-book', 'online-nav', 'pieces', 'piece-themes', 'piece-settings', 'sample', 'study'];
+const modules = ['annotations', 'app', 'bootstrap', 'chess-core', 'completion-alerts', 'engine', 'engine-options', 'insight', 'move-sounds', 'notification-center', 'opening-book', 'online-nav', 'pieces', 'piece-themes', 'piece-settings', 'sample', 'study', 'theme'];
 const files = [
   ['index.html', 'index.html'],
   ['styles.css', 'styles.css'],
   ['notifications.css', 'notifications.css'],
+  ['theme.css', 'theme.css'],
   ['online/play.js', 'online/play.js'],
   ['online/play.css', 'online/play.css'],
   ['online/account.js', 'online/account.js'],
