@@ -192,7 +192,8 @@ html[data-palette] :is(.square.dark,.online-square.dark,.guide-square.dark,.piec
 html[data-palette] :is(.square.last-move,.online-square.last){background-color:var(--board-last-light)}
 html[data-palette] :is(.square.dark.last-move,.online-square.dark.last){background-color:var(--board-last-dark)}
 html[data-palette] .square.selected{background-color:var(--board-last-dark);box-shadow:inset 0 0 0 3px #ecba51}
-html[data-palette] .online-square.check{background-color:#d8907b}
+/* Check must remain visible above every palette square and move highlight. */
+html[data-palette] #online-board .online-square.check{background-color:#d8907b}
 html[data-palette] :is(.square .coordinate,.online-square .file,.online-square .rank,.guide-square small){color:var(--board-ink)}
 
 #palette-open{display:inline-grid;place-items:center;flex:none;width:36px;height:36px;min-height:36px;padding:0;border:1px solid var(--ui-border);border-radius:7px;background:var(--ui-raised);color:var(--ui-accent);cursor:pointer;line-height:1}
