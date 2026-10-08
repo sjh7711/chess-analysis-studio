@@ -31,7 +31,7 @@
     const label = document.getElementById('palette-status');
     if (label) label.textContent = `${color.label} · ${dark ? '다크' : '화이트'} 모드`;
     const opener = document.getElementById('palette-open');
-    if (opener) opener.title = `화면 색상 선택 · ${color.label}`;
+    if (opener) opener.title = `화면 설정 · ${color.label}`;
   }
 
   function setMode(mode) {
@@ -47,12 +47,36 @@
     dialog.id = 'palette-dialog';
     dialog.className = 'palette-dialog';
     dialog.setAttribute('aria-labelledby', 'palette-title');
-    dialog.innerHTML = `<div class="palette-heading"><h2 id="palette-title">화면 색상</h2><button type="button" id="palette-close" aria-label="색상 선택 닫기"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
+    dialog.innerHTML = `<div class="palette-heading"><h2 id="palette-title">화면 설정</h2><button type="button" id="palette-close" aria-label="화면 설정 닫기"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
+      <div class="appearance-tabs" role="tablist" aria-label="화면 설정 항목"><button type="button" id="appearance-colors-tab" role="tab" aria-selected="true" aria-controls="appearance-colors">화면 색상</button><button type="button" id="appearance-pieces-tab" role="tab" aria-selected="false" aria-controls="appearance-pieces" tabindex="-1">기물 모양</button></div>
+      <section id="appearance-colors" class="appearance-panel" role="tabpanel" aria-labelledby="appearance-colors-tab">
       <p class="palette-description">원하는 색을 고르면 화면과 체스판에 바로 적용됩니다.</p>
       <div class="palette-modes" role="group" aria-label="화면 밝기"><button type="button" data-appearance-mode="light" aria-pressed="false">화이트 모드</button><button type="button" data-appearance-mode="dark" aria-pressed="false">다크 모드</button></div>
       <div class="palette-options" role="group" aria-label="화면 색상 선택">${palettes.map(color => `<button type="button" class="palette-option" data-palette="${color.id}" data-palette-choice="${color.id}" aria-pressed="false"><span class="palette-option-heading"><strong>${color.label}</strong><span class="palette-check" aria-hidden="true">✓</span></span><span class="palette-previews" aria-hidden="true">${['light', 'dark'].map(mode => `<span class="palette-preview ${mode}"><span class="palette-preview-bar"></span><span class="palette-preview-content"><span class="palette-preview-board"><i></i><i></i><i></i><i></i></span><span class="palette-preview-lines"><i></i><i></i><i></i></span></span><span class="palette-preview-label">${mode === 'light' ? '화이트' : '다크'}</span></span>`).join('')}</span></button>`).join('')}</div>
+      </section>
+      <section id="appearance-pieces" class="appearance-panel" role="tabpanel" aria-labelledby="appearance-pieces-tab" hidden></section>
       <div class="palette-footer"><span id="palette-status" role="status" aria-live="polite"></span><span>이 브라우저에 자동 저장</span></div>`;
     document.body.append(dialog);
+    const tabs = [...dialog.querySelectorAll('[role="tab"]')];
+    function selectTab(selected) {
+      for (const tab of tabs) {
+        const active = tab === selected;
+        tab.setAttribute('aria-selected', String(active));
+        tab.tabIndex = active ? 0 : -1;
+        document.getElementById(tab.getAttribute('aria-controls')).hidden = !active;
+      }
+    }
+    for (const [index, tab] of tabs.entries()) {
+      tab.addEventListener('click', () => selectTab(tab));
+      tab.addEventListener('keydown', event => {
+        let next;
+        if (event.key === 'ArrowRight') next = tabs[(index + 1) % tabs.length];
+        else if (event.key === 'ArrowLeft') next = tabs[(index + tabs.length - 1) % tabs.length];
+        else if (event.key === 'Home') next = tabs[0];
+        else if (event.key === 'End') next = tabs[tabs.length - 1];
+        if (next) { event.preventDefault(); selectTab(next); next.focus(); }
+      });
+    }
     opener.addEventListener('click', () => { apply(); dialog.showModal(); });
     document.getElementById('palette-close').addEventListener('click', () => dialog.close());
     dialog.addEventListener('click', event => {

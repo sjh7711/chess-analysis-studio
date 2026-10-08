@@ -272,7 +272,7 @@ window.addEventListener('popstate',()=>{$('game-result-dialog').close();roomId=n
 document.addEventListener('visibilitychange',()=>{if(document.hidden)cancelDrag();else void refresh();});window.addEventListener('pagehide',()=>{clearTimeout(pollTimer);cleanupDrag();});
 window.addEventListener('invitations-changed',()=>{void refresh();});
 let layoutFrame,mobileControls=false;
-const mobileControlHomes=[['turn-caption','mobile-turn-slot'],['move-sound','mobile-tool-extras'],['piece-settings-open','mobile-tool-extras'],['account-open','mobile-tool-extras']].map(([id,target])=>{
+const mobileControlHomes=[['turn-caption','mobile-turn-slot'],['move-sound','mobile-tool-extras'],['account-open','mobile-tool-extras']].map(([id,target])=>{
   const node=$(id),anchor=document.createComment(id+' desktop position');node.before(anchor);return{node,anchor,target:$(target)};
 });
 function setBoardTools(open,focus=false){

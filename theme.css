@@ -202,6 +202,14 @@ html[data-palette] :is(.square .coordinate,.online-square .file,.online-square .
 #palette-dialog[open]{display:flex;flex-direction:column;gap:16px}
 .palette-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;flex:none}
 .palette-heading h2{margin:0;font-size:22px;line-height:1.4}
+.appearance-tabs{display:flex;gap:4px;border-bottom:1px solid var(--ui-border);flex:none}
+.appearance-tabs button{flex:1;min-height:42px;padding:8px;border:0;border-bottom:3px solid transparent;background:transparent;color:var(--ui-muted);font-family:inherit;font-size:14px;font-weight:600;line-height:1.4;cursor:pointer}
+.appearance-tabs button[aria-selected="true"]{border-bottom-color:var(--ui-accent);color:var(--ui-accent)}
+.appearance-panel{display:flex;flex-direction:column;gap:16px;min-height:0;overflow:auto;scrollbar-gutter:stable;scrollbar-width:thin;scrollbar-color:var(--ui-scrollbar) transparent;padding:3px}
+#palette-dialog .palette-options{overflow:visible;flex:none}
+#appearance-pieces .piece-theme-list{grid-template-columns:repeat(2,minmax(0,1fr));overflow:visible;flex:none;scrollbar-gutter:auto}
+#appearance-pieces .piece-theme-check{background:var(--ui-primary)}
+#appearance-pieces .piece-settings-note{margin:0;font-size:12px;line-height:1.5;color:var(--ui-muted)}
 #palette-close{display:grid;place-items:center;width:34px;height:34px;padding:0;border:0;background:transparent;border-radius:6px;color:var(--ui-muted)}
 #palette-close:hover{background:var(--ui-hover)}
 #palette-dialog .palette-description{margin:0;color:var(--ui-muted);font-size:14px;line-height:1.6;flex:none}
@@ -232,6 +240,7 @@ html[data-palette] :is(.square .coordinate,.online-square .file,.online-square .
   #palette-dialog[open]{gap:12px}
   .palette-heading h2{font-size:20px}
   .palette-options{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+  #appearance-pieces .piece-theme-list{grid-template-columns:1fr}
   .palette-option{padding:9px;gap:8px}
   .palette-previews{gap:5px}
   .palette-preview-content{padding:0 5px}
