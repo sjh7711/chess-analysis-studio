@@ -251,7 +251,8 @@ function renderBoard() {
     const advantage = material[color] - material[color === 'w' ? 'b' : 'w'];
     $(`${location}-material`).textContent = `기물 ${material[color]}점${advantage > 0 ? ` (+${advantage})` : ''}`;
     $(`${location}-material`).setAttribute('aria-label',`${color === 'w' ? '백' : '흑'} 기물 점수 ${material[color]}점${advantage > 0 ? `, ${advantage}점 우세` : ''}`);
-    $(`${location}-side`).textContent = side.toUpperCase();
+    $(`${location}-side`).dataset.color = color;
+    $(`${location}-side`).querySelector('.side-badge').textContent = `${color === 'w' ? '백' : '흑'} · ${side.toUpperCase()}`;
     $(`${location}-captured`).innerHTML=capturedMarkup(captured[color],color);
     const active = (state.editor?.turn || chess.turn()) === color;
     const strip = $(`${location}-player`).closest('.player-strip');

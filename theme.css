@@ -28,13 +28,15 @@
   --board-light:hsl(var(--palette-hue) calc(var(--palette-saturation) * .25) 91%);
   --board-dark:hsl(var(--palette-hue) calc(var(--palette-saturation) * .5) 60%);
   --board-ink:hsl(var(--palette-hue) var(--palette-tint) 23%);
-  --board-last-light:hsl(var(--palette-hue) var(--palette-saturation) 80%);
-  --board-last-dark:hsl(var(--palette-hue) var(--palette-saturation) 70%);
+  /* Move markers keep a distinct accent even on the grayscale board. */
+  --board-last-light:#f5d76c;
+  --board-last-dark:#dab54a;
+  --board-last-outline:#926613;
   /* Keep the two sides distinct in either mode while following the palette. */
   --eval-rail-light:hsl(var(--palette-hue) calc(var(--palette-saturation) * .25) 96%);
   --eval-rail-dark:hsl(var(--palette-hue) calc(var(--palette-saturation) * .35) 24%);
 }
-html[data-palette="green"]{--board-light:#eeedda;--board-dark:#84a287;--board-last-light:#dedb88;--board-last-dark:#b3bd60}
+html[data-palette="green"]{--board-light:#eeedda;--board-dark:#84a287}
 html[data-theme="dark"]{
   --ui-bg:hsl(var(--palette-hue) var(--palette-tint) 8%);
   --ui-header:hsl(var(--palette-hue) var(--palette-tint) 11%);
@@ -181,6 +183,14 @@ html[data-theme] .turn-caption:before{background:var(--ui-muted);box-shadow:none
 html[data-theme] :is(.turn-caption.my-turn,.turn-caption.finished):before{background:var(--ui-accent);box-shadow:0 0 0 3px var(--ui-glow)}
 html[data-theme] :is(.dark-avatar,.brand-mark){background:var(--ui-primary);color:#fff}
 html[data-theme] .light-avatar{background:var(--ui-panel);border-color:var(--ui-border);color:var(--ui-text)}
+/* Player colors describe the pieces, so they stay black and white in every palette. */
+html[data-theme] .player-strip .avatar.dark-avatar{background:#242424;color:#fff;border:1px solid #858585}
+html[data-theme] .player-strip .avatar.light-avatar{background:#fff;color:#242424;border:1px solid #858585}
+.player-strip .player-side{display:inline-flex;align-items:center;padding-right:6px;letter-spacing:0;text-shadow:none}
+.player-side .side-badge{display:inline-flex;align-items:center;justify-content:center;min-height:28px;padding:4px 9px;border:1px solid #858585;border-radius:6px;font-size:12px;font-weight:750;line-height:1.25;white-space:nowrap;text-shadow:none}
+.player-side[data-color="b"] .side-badge{background:#242424;color:#fff}
+.player-side[data-color="w"] .side-badge{background:#fff;color:#242424}
+@media(max-width:700px){.player-side .side-badge{padding:4px 6px;font-size:11px;min-height:26px}}
 html[data-theme] .toast:not(.error){background:var(--ui-primary);border-color:var(--ui-accent-border);color:#fff}
 html[data-theme] #eval-chart>line:first-child{stroke:var(--ui-border)}
 html[data-theme] #eval-chart circle{fill:var(--ui-panel);stroke:var(--ui-accent)}
@@ -191,6 +201,7 @@ html[data-palette] :is(.square,.online-square,.guide-square,.piece-theme-sample>
 html[data-palette] :is(.square.dark,.online-square.dark,.guide-square.dark,.piece-theme-sample>span:nth-child(even)){background-color:var(--board-dark)}
 html[data-palette] :is(.square.last-move,.online-square.last){background-color:var(--board-last-light)}
 html[data-palette] :is(.square.dark.last-move,.online-square.dark.last){background-color:var(--board-last-dark)}
+html[data-palette] :is(.square.last-move,.online-square.last)::before{content:"";position:absolute;inset:2px;border:2px solid var(--board-last-outline);border-radius:2px;pointer-events:none}
 html[data-palette] .square.selected{background-color:var(--board-last-dark);box-shadow:inset 0 0 0 3px #ecba51}
 /* Check must remain visible above every palette square and move highlight. */
 html[data-palette] #online-board .online-square.check{background-color:#d8907b}
