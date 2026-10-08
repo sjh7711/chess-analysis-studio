@@ -7,6 +7,7 @@ import { mountAccount } from './account.js';
 import '../src/piece-settings.js';
 
 const $=id=>document.getElementById(id), esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const noticeHome=document.createComment('notice lobby position');$('notice').before(noticeHome);
 const names={p:'폰',n:'나이트',b:'비숍',r:'룩',q:'퀸',k:'킹'};
 const moveSounds=new MoveSounds({button:$('move-sound')});
 let me,game,roomId=new URL(location.href).searchParams.get('room'),inviteToken=new URLSearchParams(location.hash.slice(1)).get('invite')||'',selected=null,pending=null,promoting=null,sending=false,flipped=false,pollTimer,refreshBusy=false,rendered=null,boardKey='',drag=null,suppressClick=0,dialogAction=null;
@@ -22,7 +23,13 @@ if(roomId&&inviteToken)try{sessionStorage.setItem('chessreview.invite.'+roomId,i
 if(roomId&&!inviteToken)try{inviteToken=sessionStorage.getItem('chessreview.invite.'+roomId)||'';}catch{}
 const chessFor=g=>{const c=new Chess();for(const uci of g?.moves||[])c.move(uci);return c;};
 const displayedChess=()=>chessFor({...game,moves:game.moves.slice(0,reviewPly??game.moves.length)});
-function notice(text,error=false){$('notice').textContent=text;$('notice').classList.toggle('error',error);$('notice').hidden=!text;}
+function syncNoticePlacement(){
+  const element=$('notice'),inGame=!$('room').hidden&&!$('game-area').hidden;
+  if(inGame){if(element.parentElement!==$('room-overlays'))$('room-overlays').prepend(element);}
+  else if(element.previousSibling!==noticeHome)noticeHome.after(element);
+}
+function notice(text,error=false){$('notice-text').textContent=text;$('notice').classList.toggle('error',error);$('notice').hidden=!text;syncNoticePlacement();}
+$('notice-dismiss').onclick=()=>notice('');
 async function api(path,body){
   const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),10000);
   try{
@@ -285,6 +292,7 @@ $('board-tools-toggle').onclick=()=>setBoardTools($('board-tools-toggle').getAtt
 document.addEventListener('pointerdown',event=>{if(mobileControls&&!event.target.closest('#board-tools,#board-tools-toggle'))setBoardTools(false);});
 document.addEventListener('keydown',event=>{if(event.key==='Escape'&&mobileControls&&$('board-tools').classList.contains('is-open')){setBoardTools(false,true);event.preventDefault();}});
 function syncMobileControls(){
+  syncNoticePlacement();
   const mobile=matchMedia('(max-width:700px)').matches&&!$('game-area').hidden&&!$('room').hidden;
   if(mobile===mobileControls)return;
   mobileControls=mobile;document.body.classList.toggle('mobile-game',mobile);setBoardTools(false);
