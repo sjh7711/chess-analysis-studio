@@ -22,7 +22,8 @@ async function expireGame(row,db,time){
   const s=JSON.parse(row.state_json),clock=clockAt(s,time);if(!clock)return row;
   const c=chessAt(s),loser=c.turn(),key=loser==='w'?'white':'black';if(clock[key]>0)return row;
   const winner=loser==='w'?'b':'w',canMate=c.board().flat().some(p=>p&&p.color===winner&&p.type!=='k');
-  s.clock={...clock,startedAt:null};s.result=canMate?(winner==='w'?'1-0':'0-1'):'1/2-1/2';s.reason=canMate?`${loser==='w'?'백':'흑'} 시간 초과`:'시간 초과 · 상대 체크메이트 기물 부족';s.request=null;
+  s.clock={...clock,startedAt:null};s.result=canMate?(winner==='w'?'1-0':'0-1'):'1/2-1/2';s.reason=canMate?`${loser==='w'?'백':'흑'} 시간 초과`:'시간 초과 · 상대 체크메이트 기물 부족';
+  if(s.request?.kind!=='undo')s.request=null;
   const changed=await db.prepare("UPDATE games SET state_json=?,status='finished',revision=revision+1,updated_at=? WHERE id=? AND revision=? RETURNING *").bind(JSON.stringify(s),time,row.id,row.revision).first();
   return changed||await db.prepare('SELECT * FROM games WHERE id=?').bind(row.id).first();
 }
@@ -35,6 +36,32 @@ function resultOf(c) {
   if(c.isDrawByFiftyMoves())return {result:'1/2-1/2',reason:'50수 규칙'};
   return null;
 }
+function restoreUndo(s,c,recipient,time) {
+  const request=s.request,target=request.ply-1,history=c.history({verbose:true});
+  if(!Number.isInteger(target)||target<0||target>=history.length)fail(409,'되돌릴 요청 국면을 찾을 수 없습니다.');
+  if(s.clock){
+    for(const [color,key] of [['w','white'],['b','black']]){
+      const restoreTime=(color==='w'?s.whiteUser:s.blackUser)===recipient&&Number.isFinite(request.clock?.[key]);
+      // The recipient recovers request-time thinking time; the requester keeps all elapsed time.
+      const removed=restoreTime?[history[target]]:history.slice(target);
+      const increment=removed.filter(move=>move.color===color).length*s.clock.increment;
+      s.clock[key]=Math.max(0,(restoreTime?request.clock[key]:s.clock[key])-increment);
+    }
+    s.clock.startedAt=time;
+  }
+  s.moves=s.moves.slice(0,target);s.result='*';s.reason=null;s.lastOffer=null;
+  // A requester who has exhausted their own time does not regain it by undoing.
+  if(s.clock){
+    const requesterColor=s.whiteUser===request.from?'w':'b';
+    if(s.clock[requesterColor==='w'?'white':'black']===0){
+      const winner=requesterColor==='w'?'b':'w';
+      const canMate=chessAt(s).board().flat().some(p=>p&&p.color===winner&&p.type!=='k');
+      s.result=canMate?(winner==='w'?'1-0':'0-1'):'1/2-1/2';
+      s.reason=canMate?`${requesterColor==='w'?'백':'흑'} 시간 초과`:'시간 초과 · 상대 체크메이트 기물 부족';
+    }
+  }
+  return s.result==='*'?'active':'finished';
+}
 function pgnFor(s,created) {
   const c=chessAt(s);
   for(const [key,value] of Object.entries({Event:'친구와 1대1 대국',Site:'Chess Review Studio',Date:new Date(created).toISOString().slice(0,10).replaceAll('-','.'),White:s.whiteName,Black:s.blackName,Result:s.result||'*',TimeControl:s.clock?`${s.clock.initial/1000}+${s.clock.increment/1000}`:'-'}))c.setHeader(key,value);
@@ -46,15 +73,16 @@ function view(row,user,{invited=false,now=Date.now()}={}) {
   const color=member?(s.whiteUser===user?'w':'b'):null;
   if(!member)return {id:row.id,status:row.status,host:s.hostName,timeControl:s.timeControl,invited,canJoin:row.status==='waiting'&&(invited||row.target_user===user),createdAt:row.created_at};
   const c=chessAt(s),history=c.history({verbose:true});
-  return {id:row.id,status:row.status,revision:row.revision,mode:s.mode,color,host:s.hostName,white:s.whiteName,black:s.blackName,timeControl:s.timeControl,clock:clockAt(s,now),serverNow:now,fen:c.fen(),turn:c.turn(),check:c.isCheck(),moves:s.moves,history:history.map(m=>({san:m.san,label:moveLabel(m),from:m.from,to:m.to,color:m.color})),result:s.result,reason:s.reason,request:s.request?{...s.request,from:undefined,mine:s.request.from===user}:null,createdAt:row.created_at,updatedAt:row.updated_at,inviteToken:row.status==='waiting'&&row.owner_user===user&&s.mode==='invite'?s.inviteToken:undefined,pgn:row.status==='finished'?pgnFor(s,row.created_at):undefined};
+  return {id:row.id,status:row.status,revision:row.revision,mode:s.mode,color,host:s.hostName,white:s.whiteName,black:s.blackName,timeControl:s.timeControl,clock:clockAt(s,now),serverNow:now,fen:c.fen(),turn:c.turn(),check:c.isCheck(),moves:s.moves,history:history.map(m=>({san:m.san,label:moveLabel(m),from:m.from,to:m.to,color:m.color})),result:s.result,reason:s.reason,request:s.request?{...s.request,from:undefined,clock:undefined,mine:s.request.from===user}:null,createdAt:row.created_at,updatedAt:row.updated_at,inviteToken:row.status==='waiting'&&row.owner_user===user&&s.mode==='invite'?s.inviteToken:undefined,pgn:row.status==='finished'?pgnFor(s,row.created_at):undefined};
 }
-export async function handleGameRequest(request,db,{now=Date.now}={}) {
+export async function handleGameRequest(request,db,{now=Date.now,undoRetries=2}={}) {
   try {
     const url=new URL(request.url),path=url.pathname.replace(/^\/api\/play\/?/,'').split('/').filter(Boolean),method=request.method;
     if(method!=='GET'){
       if(request.headers.get('origin')!==url.origin||request.headers.get('sec-fetch-site')==='cross-site')fail(403,'이 사이트에서 요청해 주세요.');
       if(!request.headers.get('content-type')?.startsWith('application/json'))fail(415,'JSON 요청이 필요합니다.');
     }
+    const retryRequest=method==='POST'&&path[2]==='action'&&undoRetries>0?request.clone():null;
     const body=method==='GET'?{}:await readBody(request);
     if(path[0]==='auth'&&path.length===2)return await handleAuthRequest(request,db,path[1],body,now());
     const account=await getAccountSession(request,db,now()),user=account?.user_id;
@@ -135,7 +163,7 @@ export async function handleGameRequest(request,db,{now=Date.now}={}) {
     if(member){row=await expireGame(row,db,now());s=JSON.parse(row.state_json);}
     if(method==='GET')return json({game:view(row,user,{invited,now:now()})});
     if(method!=='POST')fail(405,'지원하지 않는 요청입니다.');
-    let status=row.status,guest=row.guest_user;
+    let status=row.status,guest=row.guest_user,undoResponse=false;
     if(path[2]==='join'){
       if(row.status!=='waiting'||member)fail(409,'이미 참가했거나 시작된 대국입니다.');
       guest=user;
@@ -150,33 +178,35 @@ export async function handleGameRequest(request,db,{now=Date.now}={}) {
       status='cancelled';s.reason='초대 취소';
     }else if(path[2]==='action'){
       if(!member)fail(403,'대국 참가자만 조작할 수 있습니다.');
-      if(row.status!=='active')fail(409,'진행 중인 대국이 아닙니다.');
-      if(body.revision!==row.revision)fail(409,'대국이 변경되었습니다. 최신 상태를 확인한 뒤 다시 시도해 주세요.');
+      undoResponse=body.type==='respond'&&s.request?.kind==='undo'&&s.request.id===body.requestId;
+      const undoWithdrawal=body.type==='withdraw'&&s.request?.kind==='undo'&&s.request.from===user;
+      if(row.status!=='active'&&!(row.status==='finished'&&(undoResponse||undoWithdrawal)))fail(409,'진행 중인 대국이 아닙니다.');
+      if(body.revision!==row.revision&&!undoResponse)fail(409,'대국이 변경되었습니다. 최신 상태를 확인한 뒤 다시 시도해 주세요.');
       const color=s.whiteUser===user?'w':'b',c=chessAt(s);
       s.clock=clockAt(s,now());
       if(body.type==='move'){
         if(c.turn()!==color)fail(409,'상대방의 차례입니다.');
         if(typeof body.uci!=='string'||!/^([a-h][1-8]){2}[qrbn]?$/.test(body.uci))fail(400,'올바르지 않은 이동입니다.');
         try{c.move(body.uci);}catch{fail(400,'그 위치로 이동할 수 없습니다.');}
-        s.moves.push(body.uci);s.request=null;
+        s.moves.push(body.uci);if(s.request?.kind!=='undo')s.request=null;
         if(s.clock)s.clock[color==='w'?'white':'black']+=s.clock.increment;
         const end=resultOf(c);if(end){Object.assign(s,end);status='finished';}
       }else if(body.type==='resign'){
-        s.result=color==='w'?'0-1':'1-0';s.reason=`${color==='w'?'백':'흑'} 기권`;s.request=null;status='finished';
+        s.result=color==='w'?'0-1':'1-0';s.reason=`${color==='w'?'백':'흑'} 기권`;if(s.request?.kind!=='undo')s.request=null;status='finished';
       }else if(body.type==='offer'){
         if(!['draw','undo'].includes(body.kind))fail(400,'잘못된 요청입니다.');
         if(s.request)fail(409,'응답을 기다리는 요청이 있습니다.');
         if(body.kind==='undo'&&!s.moves.length)fail(409,'되돌릴 수가 없습니다.');
         if(s.lastOffer?.from===user&&s.lastOffer.ply===s.moves.length)fail(409,'이 국면에서는 이미 요청했습니다. 다음 이동 후 다시 요청해 주세요.');
         const last=c.history({verbose:true}).at(-1);
-        s.request={id:id(),kind:body.kind,from:user,ply:s.moves.length,label:body.kind==='undo'?moveLabel(last):'무승부',createdAt:now()};
+        s.request={id:id(),kind:body.kind,from:user,ply:s.moves.length,label:body.kind==='undo'?moveLabel(last):'무승부',createdAt:now(),...(body.kind==='undo'&&s.clock?{clock:{...s.clock}}:{})};
         s.lastOffer={from:user,ply:s.moves.length};
       }else if(body.type==='respond'){
         if(!s.request||s.request.id!==body.requestId||s.request.from===user)fail(409,'응답할 요청이 없습니다.');
         if(typeof body.accept!=='boolean')fail(400,'수락 여부가 필요합니다.');
         if(body.accept){
           if(s.request.kind==='draw'){s.result='1/2-1/2';s.reason='무승부 합의';status='finished';}
-          else{if(s.request.ply!==s.moves.length)fail(409,'다음 수가 진행되어 무르기 요청이 만료되었습니다.');const last=c.history({verbose:true}).at(-1);s.moves.pop();if(s.clock)s.clock[last.color==='w'?'white':'black']=Math.max(0,s.clock[last.color==='w'?'white':'black']-s.clock.increment);}
+          else status=restoreUndo(s,c,user,now());
         }
         s.request=null;
       }else if(body.type==='withdraw'){
@@ -186,7 +216,11 @@ export async function handleGameRequest(request,db,{now=Date.now}={}) {
     const changed=now();
     if(status==='finished'&&s.clock)s.clock.startedAt=null;
     const updated=await db.prepare('UPDATE games SET guest_user=?,status=?,state_json=?,revision=revision+1,updated_at=? WHERE id=? AND revision=? RETURNING *').bind(guest,status,JSON.stringify(s),changed,row.id,row.revision).first();
-    if(!updated)fail(409,'상대방의 요청이 먼저 반영되었습니다. 최신 상태에서 다시 시도해 주세요.');
+    if(!updated){
+      // Re-read a still-pending undo if a move won the compare-and-swap race.
+      if(undoResponse&&retryRequest)return handleGameRequest(retryRequest,db,{now,undoRetries:undoRetries-1});
+      fail(409,'상대방의 요청이 먼저 반영되었습니다. 최신 상태에서 다시 시도해 주세요.');
+    }
     return json({game:view(updated,user,{now:now()})});
   }catch(error){if(error.status)return json({error:error.message},error.status);console.error('Online chess request failed',error);return json({error:'대국 서버에 연결하지 못했습니다. 잠시 후 다시 시도해 주세요.'},500);}
 }

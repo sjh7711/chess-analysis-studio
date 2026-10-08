@@ -73,6 +73,11 @@
     <p id="game-result-reason" class="result-reason"></p>
   </div>
   <div class="result-body">
+    <section id="result-undo-panel" class="result-undo-panel" hidden>
+      <h3 id="result-undo-title"></h3><p id="result-undo-description"></p>
+      <div id="result-undo-response" class="button-row"><button id="result-accept-undo" class="button primary">수락하고 되돌리기</button><button id="result-decline-undo" class="button">거절</button></div>
+      <button id="result-withdraw-request" class="text-button" hidden>요청 취소</button>
+    </section>
     <div class="result-scoreboard" aria-label="최종 대국 결과">
       <div class="result-player"><span class="result-side">백</span><strong id="result-white-name"></strong><span id="result-white-score" class="result-score"></span></div>
       <span class="result-versus" aria-hidden="true">:</span>

@@ -59,6 +59,11 @@ function acceptState(next){
   const changed=game?.id!==next.id||game?.revision!==next.revision||game?.status!==next.status;
   clockReceived=performance.now();
   if(!changed){game.clock=next.clock;game.serverNow=next.serverNow;renderClocks();return;}
+  if(game?.id===next.id&&(next.moves.length<game.moves.length||game.status==='finished'&&next.status==='active')){
+    reviewPly=null;rendered=null;$('game-result-dialog').close();presentedResults.delete(next.id);
+    olderGames=olderGames.filter(saved=>saved.id!==next.id);
+    notice(next.status==='active'?'무르기를 수락해 요청 당시의 한 수 전으로 돌아갔습니다.':'요청한 수를 되돌렸습니다. 사용한 시간이 모두 소진되어 대국은 종료 상태입니다.');
+  }
   if(game?.id!==next.id||(!game?.color&&next.color)){rendered=null;reviewPly=null;flipped=next.color==='b';}
   if(reviewPly!==null&&reviewPly>=next.moves.length)reviewPly=null;
   if(pending||promoting){pending=null;promoting=null;$('promotion-dialog').close();notice('대국 상태가 변경되어 이동 선택을 취소했습니다.');}
@@ -96,13 +101,20 @@ function rowMarkup(g){
   const invited=g.canJoin,status=g.status==='active'?'진행 중':invited?'받은 대국 요청':g.status==='waiting'?'참가 대기':g.reason||'종료';
   const title=g.white?`${g.white} vs ${g.black}`:`${g.host}님의 대국 요청`;
   const ended=g.status==='finished';
-  return `<article class="list-row"><div><strong>${esc(title)}</strong><small>${new Date(g.updatedAt||g.createdAt).toLocaleString('ko-KR')} · ${esc(timeLabel(g.timeControl))} · ${esc(status)}${ended?' · '+esc(g.result):''}</small></div><div class="list-actions">${invited?`<button class="button primary" data-join="${g.id}">수락하고 대국</button><button class="button" data-decline="${g.id}">거절</button>`:ended?`<a class="button primary" href="/?onlineGame=${g.id}">분석하기</a><button class="button" data-open="${g.id}">기보 보기</button>`:`<button class="button" data-open="${g.id}">${g.status==='active'?'대국으로 돌아가기':'초대 확인'}</button>`}</div></article>`;
+  return `<article class="list-row"><div><strong>${esc(title)}</strong><small>${new Date(g.updatedAt||g.createdAt).toLocaleString('ko-KR')} · ${esc(timeLabel(g.timeControl))} · ${esc(status)}${ended?' · '+esc(g.result):''}${g.request?.kind==='undo'?' · 무르기 응답 대기':''}</small></div><div class="list-actions">${invited?`<button class="button primary" data-join="${g.id}">수락하고 대국</button><button class="button" data-decline="${g.id}">거절</button>`:ended?`<a class="button primary" href="/?onlineGame=${g.id}">분석하기</a><button class="button" data-open="${g.id}">${g.request?.kind==='undo'?'무르기 요청 확인':'기보 보기'}</button>`:`<button class="button" data-open="${g.id}">${g.status==='active'?'대국으로 돌아가기':'초대 확인'}</button>`}</div></article>`;
 }
 function renderFriends(friends=[]){
   const html=friends.length?friends.map(friend=>`<article class="friend-row"><span class="friend-avatar" aria-hidden="true">♟</span><strong>${esc(friend.nickname)}</strong><button class="button primary small" data-friend="${esc(friend.friendCode)}" aria-label="${esc(friend.nickname)}님에게 대국 신청">대국 신청</button><button class="friend-remove" data-remove-friend="${esc(friend.friendCode)}" data-name="${esc(friend.nickname)}" aria-label="${esc(friend.nickname)}님을 친구 목록에서 제거" title="목록에서 제거"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 6l12 12M18 6 6 18"/></svg></button></article>`).join(''):'<p class="empty">친구를 추가하면 여기서 바로 대국을 신청할 수 있습니다.</p>';
   if(renderedFriends!==html){renderedFriends=html;$('friends-list').innerHTML=html;}
 }
-function renderLobby(games){$('lobby').hidden=false;$('room').hidden=true;const active=games.filter(g=>['waiting','active'].includes(g.status)),done=[...new Map([...games.filter(g=>g.status==='finished'),...olderGames].map(g=>[g.id,g])).values()];$('inbox').innerHTML=active.length?active.map(rowMarkup).join(''):'<p class="empty">아직 요청이 없습니다. 친구와 첫 대국을 시작해 보세요.</p>';$('history').innerHTML=done.length?done.map(rowMarkup).join(''):'<p class="empty">대국을 마치면 경기 기록이 여기에 남습니다.</p>';$('more-history').hidden=!historyCursor;scheduleGameLayout();}
+function renderLobby(games){
+  $('lobby').hidden=false;$('room').hidden=true;
+  olderGames=olderGames.filter(saved=>!games.some(current=>current.id===saved.id));
+  const active=games.filter(g=>['waiting','active'].includes(g.status)),done=[...new Map([...games.filter(g=>g.status==='finished'),...olderGames].map(g=>[g.id,g])).values()];
+  $('inbox').innerHTML=active.length?active.map(rowMarkup).join(''):'<p class="empty">아직 요청이 없습니다. 친구와 첫 대국을 시작해 보세요.</p>';
+  $('history').innerHTML=done.length?done.map(rowMarkup).join(''):'<p class="empty">대국을 마치면 경기 기록이 여기에 남습니다.</p>';
+  $('more-history').hidden=!historyCursor;scheduleGameLayout();
+}
 function playerMarkup(name,color,captured,material){
   const side=color==='w'?'백':'흑',advantage=material[color]-material[color==='w'?'b':'w'];
   return `<div class="player-info"><strong>${esc(name)}</strong><span>${side}${color===game.color?' · 나':''}</span><span class="material-score" data-material="${color}" aria-label="${side} 기물 점수 ${material[color]}점${advantage>0?`, ${advantage}점 우세`:''}" title="남은 기물의 합계 · 폰 1, 나이트·비숍 3, 룩 5, 퀸 9점 · 킹 제외">기물 ${material[color]}점${advantage>0?` (+${advantage})`:''}</span>${capturedMarkup(captured[color],color)}</div><time data-clock="${color}" aria-label="${side} 남은 시간"></time>`;
@@ -145,7 +157,20 @@ function showHistory(ply){
   const target=Math.max(0,Math.min(game.moves.length,ply));reviewPly=target===game.moves.length?null:target;renderRoom();
   if(Math.abs(target-previous)===1)void moveSounds.play(target>previous?displayedChess().history({verbose:true}).at(-1):{});
 }
-function renderRequest(){const r=game.request;$('request-panel').hidden=!r;if(!r)return;$('request-title').textContent=r.mine?'상대방의 응답을 기다립니다':r.kind==='undo'?'한 수 무르기 요청':'무승부 요청';$('request-description').textContent=r.kind==='undo'?`${r.label} 이동 1번을 되돌립니다. 추가 시간은 취소되며, 사용한 시간은 되돌리지 않습니다.`:'수락하면 이 대국은 무승부로 끝납니다. 응답 중에도 시간은 흐릅니다.';$('request-response').hidden=r.mine;$('withdraw-request').hidden=!r.mine;}
+function renderRequest(){
+  const r=game.request;
+  $('request-panel').hidden=!r;
+  $('result-undo-panel').hidden=game.status!=='finished'||r?.kind!=='undo';
+  if(!r)return;
+  const title=r.mine?'상대방의 응답을 기다립니다':r.kind==='undo'?'한 수 무르기 요청':'무승부 요청';
+  const later=Math.max(0,game.moves.length-r.ply);
+  const description=r.kind==='undo'?`${r.label} 직전으로 돌아갑니다.${later?` 요청 이후 둔 ${later}번의 이동도 취소됩니다.`:''} 요청받은 사람의 시간은 요청 시점으로 복구하고, 요청한 사람의 사용 시간은 유지합니다. 취소한 수의 추가 시간은 회수합니다.`:'수락하면 이 대국은 무승부로 끝납니다. 응답 중에도 시간은 흐릅니다.';
+  $('request-title').textContent=title;$('request-description').textContent=description;
+  $('request-response').hidden=r.mine;$('withdraw-request').hidden=!r.mine;
+  $('result-undo-title').textContent=title;$('result-undo-description').textContent=description;
+  $('result-undo-response').hidden=r.mine;$('result-withdraw-request').hidden=!r.mine;
+  for(const id of ['accept-request','decline-request','withdraw-request','result-accept-undo','result-decline-undo','result-withdraw-request'])$(id).disabled=sending;
+}
 function renderPending(){$('pending-panel').hidden=!pending;$('pending-description').textContent=pending?`${names[pending.piece]} ${pending.from} → ${pending.to}${pending.promotion?' · '+names[pending.promotion]+' 승격':''}`:'';scheduleGameLayout();}
 function renderBoard(){
   if(!game?.color)return;
@@ -187,7 +212,7 @@ function stageMove(from,to,promotion){
   const uci=from+to+(promotion||''),move=c.move(uci);selected=null;
   if(mode==='confirm'){pending={...move,uci,revision:game.revision};renderBoard();renderPending();}else void action({type:'move',uci});
 }
-async function action(body){if(sending)return;sending=true;renderPending();$('confirm-move').disabled=true;try{const {game:next}=await api('games/'+roomId+'/action',{...body,revision:game.revision});pending=null;notice('');acceptState(next);}catch(error){pending=null;notice(error.message,true);await refresh();renderBoard();renderPending();}finally{sending=false;$('confirm-move').disabled=false;if(game?.color)renderRoom();}}
+async function action(body){if(sending)return;sending=true;renderPending();renderRequest();$('confirm-move').disabled=true;try{const {game:next}=await api('games/'+roomId+'/action',{...body,revision:game.revision});pending=null;notice('');acceptState(next);}catch(error){pending=null;notice(error.message,true);await refresh();renderBoard();renderPending();}finally{sending=false;$('confirm-move').disabled=false;if(game?.color)renderRoom();}}
 async function openRoom(id){$('game-result-dialog').close();cleanupDrag();pending=null;promoting=null;selected=null;game=null;rendered=null;roomId=id;inviteToken='';history.pushState(null,'','/play?room='+id);notice('');await refresh();}
 function ask(title,description,fn){$('action-title').textContent=title;$('action-description').textContent=description;dialogAction=fn;$('action-dialog').showModal();}
 async function runButton(button,fn){if(button.disabled)return;button.disabled=true;try{await fn();}catch(error){notice(error.message,true);}finally{button.disabled=false;}}
@@ -211,10 +236,13 @@ $('confirm-move').onclick=()=>{if(pending&&pending.revision===game.revision)void
 $('cancel-move').onclick=()=>{pending=null;renderBoard();renderPending();};
 $('promotion-options').onclick=event=>{const button=event.target.closest('[data-promotion]');if(!button||!promoting)return;const {from,to,revision}=promoting;promoting=null;$('promotion-dialog').close();if(game.revision===revision)stageMove(from,to,button.dataset.promotion);};
 $('promotion-cancel').onclick=()=>{promoting=null;$('promotion-dialog').close();};$('promotion-dialog').addEventListener('cancel',()=>{promoting=null;});
-$('offer-undo').onclick=()=>ask('한 수 무르기를 요청할까요?',`${game.history.at(-1).label} 이동 1번을 취소합니다. 상대방이 수락해야 반영됩니다.`,()=>action({type:'offer',kind:'undo'}));
+$('offer-undo').onclick=()=>ask('한 수 무르기를 요청할까요?',`${game.history.at(-1).label} 직전으로 돌아갑니다. 요청 후 수가 진행되거나 대국이 끝나도 상대방이 수락하면 함께 되돌립니다. 상대의 시간은 요청 시점으로 복구하고, 내가 사용한 시간은 유지합니다.`,()=>action({type:'offer',kind:'undo'}));
 $('offer-draw').onclick=()=>ask('무승부를 요청할까요?','상대방이 수락하면 대국이 무승부로 끝납니다.',()=>action({type:'offer',kind:'draw'}));
 $('resign-game').onclick=()=>ask('기권할까요?','기권하면 상대방의 승리로 대국이 종료됩니다.',()=>action({type:'resign'}));
-$('accept-request').onclick=()=>action({type:'respond',requestId:game.request.id,accept:true});$('decline-request').onclick=()=>action({type:'respond',requestId:game.request.id,accept:false});$('withdraw-request').onclick=()=>action({type:'withdraw'});
+function respondToRequest(accept){if(game?.request)void action({type:'respond',requestId:game.request.id,accept});}
+for(const id of ['accept-request','result-accept-undo'])$(id).onclick=()=>respondToRequest(true);
+for(const id of ['decline-request','result-decline-undo'])$(id).onclick=()=>respondToRequest(false);
+for(const id of ['withdraw-request','result-withdraw-request'])$(id).onclick=()=>{if(game?.request)void action({type:'withdraw'});};
 $('action-confirm').onclick=async()=>{const fn=dialogAction;dialogAction=null;$('action-dialog').close();try{await fn?.();}catch(error){notice(error.message,true);}};$('action-cancel').onclick=()=>{$('action-dialog').close();dialogAction=null;};
 $('download-pgn').onclick=savePgn;
 $('show-result').onclick=showGameResult;
