@@ -184,7 +184,7 @@ html[data-theme] :is(.turn-caption.my-turn,.turn-caption.finished):before{backgr
 html[data-theme] :is(.dark-avatar,.brand-mark){background:var(--ui-primary);color:#fff}
 html[data-theme] .light-avatar{background:var(--ui-panel);border-color:var(--ui-border);color:var(--ui-text)}
 /* Player colors describe the pieces, so they stay black and white in every palette. */
-html[data-theme] .player-strip .avatar.dark-avatar{background:#242424;color:#fff;border:1px solid #858585}
+html[data-theme] .player-strip .avatar.dark-avatar{background:#fff;color:#242424;border:1px solid #858585}
 html[data-theme] .player-strip .avatar.light-avatar{background:#fff;color:#242424;border:1px solid #858585}
 .player-strip .player-side{display:inline-flex;align-items:center;padding-right:6px;letter-spacing:0;text-shadow:none}
 .player-side .side-badge{display:inline-flex;align-items:center;justify-content:center;min-height:28px;padding:4px 9px;border:1px solid #858585;border-radius:6px;font-size:12px;font-weight:750;line-height:1.25;white-space:nowrap;text-shadow:none}
