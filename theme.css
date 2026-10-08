@@ -140,7 +140,7 @@ html[data-theme] progress::-webkit-progress-value{background:var(--ui-accent)}
 html[data-theme] progress::-moz-progress-bar{background:var(--ui-accent)}
 html[data-theme] :is(.moves-list,.study-steps,#review-content,.online-history,.room-sidebar-content,#pv-lines){scrollbar-color:var(--ui-scrollbar) transparent}
 /* Keep piece artwork distinct from the surrounding surfaces. */
-html[data-theme="dark"] .captured-icons .piece{filter:drop-shadow(0 0 1px #d6dfc5)}
+html[data-theme="dark"] .captured-icons .piece{filter:drop-shadow(0 0 1px #d9d9d9)}
 html[data-theme] .pv-piece{background:var(--ui-piece-bg);border-radius:3px}
 html[data-theme] #chart-dock .chart-source-buttons button[aria-pressed="true"]{color:#fff}
 html[data-theme] #pv-lines .pv-best .pv-number{background:var(--ui-primary);color:#fff}

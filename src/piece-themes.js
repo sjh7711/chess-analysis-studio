@@ -2,12 +2,12 @@
 export const PIECE_THEMES = Object.freeze([
   { id: 'club', label: '클럽', description: '넓은 받침과 굵은 윤곽의 경기용 기물' },
   { id: 'pixel', label: '픽셀', description: '계단 모양으로 그린 레트로 픽셀 기물' },
-  { id: 'royal', label: '로열', description: '금빛 장식과 문장을 더한 왕실 기물' },
+  { id: 'royal', label: '로열', description: '정교한 장식과 문장을 더한 왕실 기물' },
   { id: 'paper', label: '페이퍼', description: '접힌 면이 드러나는 종이 조각 기물' },
   { id: 'arcade', label: '라운드', description: '통통한 곡선의 장난감 같은 기물' },
   { id: 'classic', label: '클래식', description: '익숙한 전통 체스 기물' },
   { id: 'modern', label: '모던', description: '선명한 각과 단순한 기하학 모양' },
-  { id: 'wood', label: '우드', description: '둥글게 깎은 따뜻한 나무 기물' },
+  { id: 'wood', label: '우드', description: '둥글게 깎은 나무 형태의 기물' },
   { id: 'outline', label: '라인', description: '가벼운 윤곽과 길쭉한 실루엣' },
   { id: 'badge', label: '심볼', description: '둥근 토큰 위의 또렷한 기물 문양' },
 ]);
@@ -117,8 +117,10 @@ export function renderThemedPiece(type, color, theme = 'classic') {
   const side = color === 'b' ? 'b' : 'w';
   const piece = Object.hasOwn(classic, type) ? type : 'p';
   const light = side === 'w';
-  let fill = light ? '#fffdf5' : '#263d34';
-  let stroke = light ? '#45544b' : '#162b23';
+  // Piece colors stay neutral regardless of the board palette or design.
+  const fill = light ? '#ffffff' : '#242424';
+  const stroke = light ? '#454545' : '#111111';
+  const detail = light ? '#707070' : '#d0d0d0';
   let width = 1.5;
   let linecap = 'round';
   let linejoin = 'round';
@@ -126,52 +128,36 @@ export function renderThemedPiece(type, color, theme = 'classic') {
   let rendering = '';
   let artwork = shapes[selected][piece];
   if (selected === 'modern') {
-    fill = light ? '#f9fcff' : '#283947';
-    stroke = light ? '#3c4f5c' : '#101e28';
     width = 1.7;
   } else if (selected === 'wood') {
-    fill = light ? '#f4d5a2' : '#75432b';
-    stroke = light ? '#705138' : '#362014';
     width = 1.7;
   } else if (selected === 'outline') {
-    fill = light ? '#ffffff' : '#253640';
-    stroke = light ? '#334952' : '#0c202b';
     width = 1.9;
   } else if (selected === 'badge') {
-    const token = light ? '#fff9eb' : '#273c47';
-    const ink = light ? '#364d58' : '#f8efd8';
+    const token = fill;
+    const ink = light ? '#242424' : '#ffffff';
     // Explicit CSS variables are local to this SVG and need no unique IDs.
-    artwork = `<circle cx="22.5" cy="22.5" r="18.5" fill="${token}" stroke="${light ? '#5a6e70' : '#142630'}" stroke-width="1.6"/><g fill="${ink}" stroke="none" style="--theme-cutout:${token}">${artwork}</g>`;
+    artwork = `<circle cx="22.5" cy="22.5" r="18.5" fill="${token}" stroke="${stroke}" stroke-width="1.6"/><g fill="${ink}" stroke="none" style="--theme-cutout:${token}">${artwork}</g>`;
   } else if (selected === 'club') {
-    fill = light ? '#fff8e8' : '#25272c';
-    stroke = light ? '#373a40' : '#111318';
     width = 1.8;
-    groupStyle = ` style="--theme-detail:${light ? '#6d6b65' : '#ddd9cb'}"`;
+    groupStyle = ` style="--theme-detail:${detail}"`;
   } else if (selected === 'pixel') {
-    fill = light ? '#fff2bf' : '#28314b';
-    stroke = light ? '#4e452e' : '#131a30';
     width = 1.4;
     linecap = 'butt';
     linejoin = 'miter';
     rendering = ' shape-rendering="crispEdges"';
-    groupStyle = ` style="--theme-detail:${light ? '#d6b35e' : '#8ba5d5'}"`;
+    groupStyle = ` style="--theme-detail:${detail}"`;
   } else if (selected === 'royal') {
-    fill = light ? '#fff5da' : '#473045';
-    stroke = light ? '#715a35' : '#291d2b';
     width = 1.5;
-    groupStyle = ` style="--theme-detail:${light ? '#a07632' : '#edc978'}"`;
+    groupStyle = ` style="--theme-detail:${detail}"`;
   } else if (selected === 'paper') {
-    fill = light ? '#fff7ef' : '#385573';
-    stroke = light ? '#715e57' : '#1c324b';
     width = 1.3;
     linecap = 'square';
     linejoin = 'miter';
-    groupStyle = ` style="--theme-detail:${light ? '#b58472' : '#9bbad7'};--theme-facet:${light ? '#e8bba4' : '#23415f'}"`;
+    groupStyle = ` style="--theme-detail:${detail};--theme-facet:${light ? '#d9d9d9' : '#161616'}"`;
   } else if (selected === 'arcade') {
-    fill = light ? '#fff9de' : '#39405f';
-    stroke = light ? '#646076' : '#202640';
     width = 1.8;
-    groupStyle = ` style="--theme-detail:${light ? '#d4b371' : '#99acd7'}"`;
+    groupStyle = ` style="--theme-detail:${detail}"`;
   }
   return `<svg viewBox="0 0 45 45" aria-hidden="true" class="piece ${light ? 'white-piece' : 'black-piece'}" data-piece-type="${piece}" data-piece-color="${side}" data-piece-theme="${selected}" style="color:${stroke}"${rendering}><g fill="${fill}" stroke="${stroke}" stroke-width="${width}" stroke-linecap="${linecap}" stroke-linejoin="${linejoin}"${groupStyle}>${artwork}</g></svg>`;
 }
