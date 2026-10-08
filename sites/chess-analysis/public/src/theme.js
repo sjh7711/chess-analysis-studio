@@ -26,11 +26,6 @@
     root.dataset.theme = dark ? 'dark' : 'light';
     root.dataset.palette = color.id;
     document.querySelector('meta[name="theme-color"]')?.setAttribute('content', `hsl(${color.hue} ${dark ? Math.min(color.saturation, 12) : color.saturation}% ${dark ? 12 : 30}%)`);
-    const button = document.getElementById('theme-toggle');
-    if (button) {
-      button.setAttribute('aria-pressed', String(dark));
-      button.title = dark ? '라이트 모드로 전환' : '다크 모드로 전환';
-    }
     document.querySelectorAll('[data-palette-choice]').forEach(option => option.setAttribute('aria-pressed', String(option.dataset.paletteChoice === color.id)));
     document.querySelectorAll('[data-appearance-mode]').forEach(option => option.setAttribute('aria-pressed', String(option.dataset.appearanceMode === root.dataset.theme)));
     const label = document.getElementById('palette-status');
@@ -72,9 +67,6 @@
   document.addEventListener('DOMContentLoaded', () => {
     mountPalette();
     apply();
-    document.getElementById('theme-toggle')?.addEventListener('click', () => {
-      setMode(root.dataset.theme === 'dark' ? 'light' : 'dark');
-    });
   }, { once: true });
   system.addEventListener('change', () => { if (!valid(preference)) apply(); });
   window.addEventListener('storage', event => {

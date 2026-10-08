@@ -320,7 +320,7 @@ function renderAnalysis() {
   rail.title = evaluationHint();
   const value = result?.score ? displayValue(result.score) : 0;
   $('eval-fill').style.height = `${100 / (1 + Math.exp(-Math.max(-2000,Math.min(2000,value))/230))}%`;
-  $('rail-score').style.color = (value < -180) !== state.flipped ? '#f6f7ed' : '#496049';
+  $('rail-score').style.color = (value < -180) !== state.flipped ? 'var(--eval-rail-light)' : 'var(--eval-rail-dark)';
   const complete = [...state.results.values()].filter(isCached).length;
   $('analyze-game').textContent = state.mode === 'full' ? '분석 중단' : `${state.game.moves.length ? (complete === state.game.positions.length ? '전체 대국 다시 분석' : complete > 0 ? '남은 대국 분석' : '전체 대국 분석') : '현재 국면 분석'}`;
   $('depth').disabled = state.mode === 'full' || !!state.editor;

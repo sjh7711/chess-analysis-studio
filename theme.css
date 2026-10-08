@@ -30,6 +30,9 @@
   --board-ink:hsl(var(--palette-hue) var(--palette-tint) 23%);
   --board-last-light:hsl(var(--palette-hue) var(--palette-saturation) 80%);
   --board-last-dark:hsl(var(--palette-hue) var(--palette-saturation) 70%);
+  /* Keep the two sides distinct in either mode while following the palette. */
+  --eval-rail-light:hsl(var(--palette-hue) calc(var(--palette-saturation) * .25) 96%);
+  --eval-rail-dark:hsl(var(--palette-hue) calc(var(--palette-saturation) * .35) 24%);
 }
 html[data-palette="green"]{--board-light:#eeedda;--board-dark:#84a287;--board-last-light:#dedb88;--board-last-dark:#b3bd60}
 html[data-theme="dark"]{
@@ -51,13 +54,9 @@ html[data-theme="dark"]{
   --ui-chart-fill:hsl(var(--palette-hue) var(--palette-saturation) 65% / .25);
   --ui-scrollbar:hsl(var(--palette-hue) var(--palette-tint) 42%);
 }
-/* Shared appearance controls; keep the bell and theme toggle together when wrapping. */
+/* Keep the bell and palette control together when wrapping. */
 html{color-scheme:light}
 .topbar nav .header-display-actions,.play-header nav .header-display-actions{display:inline-flex;align-items:center;gap:8px;flex:none;padding:0}
-#theme-toggle{display:inline-grid;place-items:center;flex:none;width:36px;height:36px;min-height:36px;padding:0;border:1px solid #cdd9c4;border-radius:7px;background:#fafcf7;color:#4d6b3d;cursor:pointer;line-height:1}
-#theme-toggle:hover{background:#e9f0e0}
-#theme-toggle svg{display:block;width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round;pointer-events:none}
-html[data-theme="light"] .theme-sun,html[data-theme="dark"] .theme-moon{display:none!important}
 
 html[data-theme="dark"]{color-scheme:dark}
 html[data-theme] body{background:var(--ui-bg);color:var(--ui-text)}
@@ -122,8 +121,8 @@ html[data-theme="dark"] .game-actions .request-button{background:#b34f43;border-
 html[data-theme="dark"] .game-actions .request-button:hover:not(:disabled){background:#ca6053}
 html[data-theme="dark"] .notification-entry-status.waiting{color:#ffa69d}
 html[data-theme="dark"] .notification-entry.unread .notification-entry-top strong:before{background:#ff8c80}
-html[data-theme] :is(.notification-bell,#completion-alert-open):not(.has-invitations):not(.has-completion),html[data-theme] #theme-toggle{background:var(--ui-raised);border-color:var(--ui-border);color:var(--ui-accent)}
-html[data-theme] :is(.notification-bell,#completion-alert-open):not(.has-invitations):not(.has-completion):hover,html[data-theme] #theme-toggle:hover{background:var(--ui-hover)}
+html[data-theme] :is(.notification-bell,#completion-alert-open):not(.has-invitations):not(.has-completion){background:var(--ui-raised);border-color:var(--ui-border);color:var(--ui-accent)}
+html[data-theme] :is(.notification-bell,#completion-alert-open):not(.has-invitations):not(.has-completion):hover{background:var(--ui-hover)}
 html[data-theme="dark"] .notification-bell:focus-visible,html[data-theme="dark"] .invitation-actions button:focus-visible{outline-color:#c0dba5}
 html[data-theme] .piece-theme-option{background:var(--ui-raised);color:var(--ui-text);border-color:var(--ui-border)}
 html[data-theme] .piece-theme-option[aria-pressed="true"]{background:var(--ui-highlight);border-color:var(--ui-accent);box-shadow:0 0 0 1px var(--ui-accent)}
@@ -158,6 +157,7 @@ html[data-theme] .mistake{background:#994c21}
 html[data-theme] .blunder{background:#a24338}
 html[data-theme] .miss{background:#9e492c}
 @media(max-width:700px){
+  .play-header nav{min-width:0;max-width:100%}
   html[data-theme] body.mobile-game :is(#board-tools,.history-panel .online-history){background:var(--ui-panel);border-color:var(--ui-border)}
   html[data-theme] body.mobile-game :is(.history-panel,.move-mode-panel,.notation-row){background:transparent}
   .topbar nav .header-display-actions,.play-header nav .header-display-actions{gap:6px}
