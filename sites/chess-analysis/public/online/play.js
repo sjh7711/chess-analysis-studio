@@ -243,7 +243,7 @@ function stageMove(from,to,promotion){
   const uci=from+to+(promotion||''),move=c.move(uci);selected=null;
   if(mode==='confirm'){pending={...move,uci,revision:game.revision};renderBoard();renderPending();}else void action({type:'move',uci});
 }
-async function action(body){if(sending)return;sending=true;renderPending();renderRequest();$('confirm-move').disabled=true;try{const {game:next}=await api('games/'+roomId+'/action',{...body,revision:game.revision});pending=null;notice('');acceptState(next);}catch(error){pending=null;notice(error.message,true);await refresh();renderBoard();renderPending();}finally{sending=false;$('confirm-move').disabled=false;if(game?.color)renderRoom();}}
+async function action(body){if(sending)return;sending=true;renderPending();renderRequest();$('confirm-move').disabled=true;try{const {game:next}=await api('games/'+roomId+'/action',{revision:game.revision,...body});pending=null;notice('');acceptState(next);}catch(error){pending=null;notice(error.message,true);await refresh();renderBoard();renderPending();}finally{sending=false;$('confirm-move').disabled=false;if(game?.color)renderRoom();}}
 async function openRoom(id){$('game-result-dialog').close();cleanupDrag();pending=null;promoting=null;selected=null;game=null;rendered=null;roomId=id;inviteToken='';history.pushState(null,'','/play?room='+id);notice('');await refresh();}
 function ask(title,description,fn){$('action-title').textContent=title;$('action-description').textContent=description;dialogAction=fn;$('action-dialog').showModal();}
 async function runButton(button,fn){if(button.disabled)return;button.disabled=true;try{await fn();}catch(error){notice(error.message,true);}finally{button.disabled=false;}}
@@ -267,7 +267,10 @@ $('confirm-move').onclick=()=>{if(pending&&pending.revision===game.revision)void
 $('cancel-move').onclick=()=>{pending=null;renderBoard();renderPending();};
 $('promotion-options').onclick=event=>{const button=event.target.closest('[data-promotion]');if(!button||!promoting)return;const {from,to,revision}=promoting;promoting=null;$('promotion-dialog').close();if(game.revision===revision)stageMove(from,to,button.dataset.promotion);};
 $('promotion-cancel').onclick=()=>{promoting=null;$('promotion-dialog').close();};$('promotion-dialog').addEventListener('cancel',()=>{promoting=null;});
-$('offer-undo').onclick=()=>ask('한 수 무르기를 요청할까요?',`${game.history.at(-1).label} 직전으로 돌아갑니다. 요청 후 수가 진행되거나 대국이 끝나도 상대방이 수락하면 함께 되돌립니다. 상대의 시간은 요청 시점으로 복구하고, 내가 사용한 시간은 유지합니다.`,()=>action({type:'offer',kind:'undo'}));
+$('offer-undo').onclick=()=>{
+  const revision=game.revision,targetRoom=roomId;
+  ask('한 수 무르기를 요청할까요?',`${game.history.at(-1).label} 직전으로 돌아갑니다. 요청 후 수가 진행되거나 대국이 끝나도 상대방이 수락하면 함께 되돌립니다. 상대의 시간은 요청 시점으로 복구하고, 내가 사용한 시간은 유지합니다.`,()=>{if(roomId===targetRoom)return action({type:'offer',kind:'undo',revision});});
+};
 $('offer-draw').onclick=()=>ask('무승부를 요청할까요?','상대방이 수락하면 대국이 무승부로 끝납니다.',()=>action({type:'offer',kind:'draw'}));
 $('resign-game').onclick=()=>ask('기권할까요?','기권하면 상대방의 승리로 대국이 종료됩니다.',()=>action({type:'resign'}));
 function respondToRequest(accept){if(game?.request)void action({type:'respond',requestId:game.request.id,accept});}

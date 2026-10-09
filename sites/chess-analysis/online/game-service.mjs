@@ -17,6 +17,18 @@ function clockAt(s,time){
   }
   return clock;
 }
+function undoPosition(row,until,change){
+  if(row.status!=='active')return null;
+  const state=JSON.parse(row.state_json);
+  return {revision:row.revision,ply:state.moves.length,clock:state.clock,until,change};
+}
+function rememberUndoPosition(row,state,time,change){
+  const before=JSON.parse(row.state_json);
+  // An accepted undo starts a new history branch; old revision targets must not cross it.
+  if(state.moves.length<before.moves.length){state.undoPositions=[];return;}
+  const position=undoPosition(row,time,change);
+  if(position)state.undoPositions=[...(state.undoPositions||[]),position].slice(-32);
+}
 async function expireGame(row,db,time){
   if(row.status!=='active')return row;
   const s=JSON.parse(row.state_json),clock=clockAt(s,time);if(!clock)return row;
@@ -24,6 +36,7 @@ async function expireGame(row,db,time){
   const winner=loser==='w'?'b':'w',canMate=c.board().flat().some(p=>p&&p.color===winner&&p.type!=='k');
   s.clock={...clock,startedAt:null};s.result=canMate?(winner==='w'?'1-0':'0-1'):'1/2-1/2';s.reason=canMate?`${loser==='w'?'백':'흑'} 시간 초과`:'시간 초과 · 상대 체크메이트 기물 부족';
   if(s.request?.kind!=='undo')s.request=null;
+  rememberUndoPosition(row,s,time,'timeout');
   const changed=await db.prepare("UPDATE games SET state_json=?,status='finished',revision=revision+1,updated_at=? WHERE id=? AND revision=? RETURNING *").bind(JSON.stringify(s),time,row.id,row.revision).first();
   return changed||await db.prepare('SELECT * FROM games WHERE id=?').bind(row.id).first();
 }
@@ -75,7 +88,7 @@ function view(row,user,{invited=false,now=Date.now()}={}) {
   const c=chessAt(s),history=c.history({verbose:true});
   return {id:row.id,status:row.status,revision:row.revision,mode:s.mode,color,host:s.hostName,white:s.whiteName,black:s.blackName,timeControl:s.timeControl,clock:clockAt(s,now),serverNow:now,fen:c.fen(),turn:c.turn(),check:c.isCheck(),moves:s.moves,history:history.map(m=>({san:m.san,label:moveLabel(m),from:m.from,to:m.to,color:m.color})),result:s.result,reason:s.reason,request:s.request?{...s.request,from:undefined,clock:undefined,mine:s.request.from===user}:null,createdAt:row.created_at,updatedAt:row.updated_at,inviteToken:row.status==='waiting'&&row.owner_user===user&&s.mode==='invite'?s.inviteToken:undefined,pgn:row.status==='finished'?pgnFor(s,row.created_at):undefined};
 }
-export async function handleGameRequest(request,db,{now=Date.now,undoRetries=2}={}) {
+export async function handleGameRequest(request,db,{now=Date.now,undoRetries=2,requestTime=now()}={}) {
   try {
     const url=new URL(request.url),path=url.pathname.replace(/^\/api\/play\/?/,'').split('/').filter(Boolean),method=request.method;
     if(method!=='GET'){
@@ -175,7 +188,7 @@ export async function handleGameRequest(request,db,{now=Date.now,undoRetries=2}=
     if(member){row=await expireGame(row,db,now());s=JSON.parse(row.state_json);}
     if(method==='GET')return json({game:view(row,user,{invited,now:now()})});
     if(method!=='POST')fail(405,'지원하지 않는 요청입니다.');
-    let status=row.status,guest=row.guest_user,undoResponse=false;
+    let status=row.status,guest=row.guest_user,undoResponse=false,undoOffer=false;
     if(path[2]==='join'){
       if(row.status!=='waiting'||member)fail(409,'이미 참가했거나 시작된 대국입니다.');
       guest=user;
@@ -191,9 +204,14 @@ export async function handleGameRequest(request,db,{now=Date.now,undoRetries=2}=
     }else if(path[2]==='action'){
       if(!member)fail(403,'대국 참가자만 조작할 수 있습니다.');
       undoResponse=body.type==='respond'&&s.request?.kind==='undo'&&s.request.id===body.requestId;
+      undoOffer=body.type==='offer'&&body.kind==='undo';
+      const undoBasis=undoOffer?(body.revision===row.revision?undoPosition(row,requestTime):s.undoPositions?.find(position=>position.revision===body.revision)):null;
+      const previous=s.undoPositions?.at(-1);
+      // If the undo offer won the race, the opponent's simultaneous move is still valid.
+      const moveAfterUndoOffer=body.type==='move'&&s.request?.kind==='undo'&&row.revision===body.revision+1&&previous?.revision===body.revision&&previous.change==='undo-offer'&&previous.ply===s.moves.length;
       const undoWithdrawal=body.type==='withdraw'&&s.request?.kind==='undo'&&s.request.from===user;
-      if(row.status!=='active'&&!(row.status==='finished'&&(undoResponse||undoWithdrawal)))fail(409,'진행 중인 대국이 아닙니다.');
-      if(body.revision!==row.revision&&!undoResponse)fail(409,'대국이 변경되었습니다. 최신 상태를 확인한 뒤 다시 시도해 주세요.');
+      if(row.status!=='active'&&!(row.status==='finished'&&(undoResponse||undoWithdrawal||undoBasis)))fail(409,'진행 중인 대국이 아닙니다.');
+      if(body.revision!==row.revision&&!undoResponse&&!undoBasis&&!moveAfterUndoOffer)fail(409,'대국이 변경되었습니다. 최신 상태를 확인한 뒤 다시 시도해 주세요.');
       const color=s.whiteUser===user?'w':'b',c=chessAt(s);
       s.clock=clockAt(s,now());
       if(body.type==='move'){
@@ -208,11 +226,13 @@ export async function handleGameRequest(request,db,{now=Date.now,undoRetries=2}=
       }else if(body.type==='offer'){
         if(!['draw','undo'].includes(body.kind))fail(400,'잘못된 요청입니다.');
         if(s.request)fail(409,'응답을 기다리는 요청이 있습니다.');
-        if(body.kind==='undo'&&!s.moves.length)fail(409,'되돌릴 수가 없습니다.');
-        if(s.lastOffer?.from===user&&s.lastOffer.ply===s.moves.length)fail(409,'이 국면에서는 이미 요청했습니다. 다음 이동 후 다시 요청해 주세요.');
-        const last=c.history({verbose:true}).at(-1);
-        s.request={id:id(),kind:body.kind,from:user,ply:s.moves.length,label:body.kind==='undo'?moveLabel(last):'무승부',createdAt:now(),...(body.kind==='undo'&&s.clock?{clock:{...s.clock}}:{})};
-        s.lastOffer={from:user,ply:s.moves.length};
+        const ply=undoBasis?.ply??s.moves.length;
+        if(body.kind==='undo'&&!ply)fail(409,'되돌릴 수가 없습니다.');
+        if(s.lastOffer?.from===user&&s.lastOffer.ply===ply)fail(409,'이 국면에서는 이미 요청했습니다. 다음 이동 후 다시 요청해 주세요.');
+        const last=c.history({verbose:true})[ply-1];
+        const requestClock=undoBasis?clockAt({moves:s.moves.slice(0,ply),clock:undoBasis.clock,result:'*'},Math.min(requestTime,undoBasis.until)):null;
+        s.request={id:id(),kind:body.kind,from:user,ply,label:body.kind==='undo'?moveLabel(last):'무승부',createdAt:requestTime,...(requestClock?{clock:requestClock}:{})};
+        s.lastOffer={from:user,ply};
       }else if(body.type==='respond'){
         if(!s.request||s.request.id!==body.requestId||s.request.from===user)fail(409,'응답할 요청이 없습니다.');
         if(typeof body.accept!=='boolean')fail(400,'수락 여부가 필요합니다.');
@@ -227,10 +247,11 @@ export async function handleGameRequest(request,db,{now=Date.now,undoRetries=2}=
     }else fail(404,'요청을 찾을 수 없습니다.');
     const changed=now();
     if(status==='finished'&&s.clock)s.clock.startedAt=null;
+    rememberUndoPosition(row,s,changed,undoOffer?'undo-offer':body.type||path[2]);
     const updated=await db.prepare('UPDATE games SET guest_user=?,status=?,state_json=?,revision=revision+1,updated_at=? WHERE id=? AND revision=? RETURNING *').bind(guest,status,JSON.stringify(s),changed,row.id,row.revision).first();
     if(!updated){
-      // Re-read a still-pending undo if a move won the compare-and-swap race.
-      if(undoResponse&&retryRequest)return handleGameRequest(retryRequest,db,{now,undoRetries:undoRetries-1});
+      // Revalidate the original revision/target after a concurrent move or undo offer.
+      if((undoResponse||undoOffer||body.type==='move')&&retryRequest)return handleGameRequest(retryRequest,db,{now,undoRetries:undoRetries-1,requestTime});
       fail(409,'상대방의 요청이 먼저 반영되었습니다. 최신 상태에서 다시 시도해 주세요.');
     }
     return json({game:view(updated,user,{now:now()})});

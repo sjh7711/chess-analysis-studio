@@ -48,6 +48,62 @@ test('friend request appears only in recipient inbox and can be accepted without
 test('friend decline and owner cancellation prevent joining',async()=>{const f=fixture();await f.players();const bob=await f.call('bob','me'),made=await f.call('alice','games',{mode:'friend',color:'w',friendCode:bob.profile.friendCode});assert.equal((await f.call('alice','games/'+made.game.id+'/decline',{})).status,409);assert.equal((await f.call('bob','games/'+made.game.id+'/decline',{})).status,200);assert.equal((await f.call('bob','games/'+made.game.id+'/join',{})).status,409);const invite=await f.call('alice','games',{mode:'invite',color:'w'});await f.call('alice','games/'+invite.game.id+'/cancel',{});assert.equal((await f.call('bob','games/'+invite.game.id+'/join',{}, {'x-invite-token':invite.game.inviteToken})).status,409);});
 test('server rejects illegal moves, wrong turn and stale revisions',async()=>{const f=fixture(),id=await f.start();assert.equal((await f.action('bob',id,{type:'move',uci:'e7e5'})).status,409);assert.equal((await f.action('alice',id,{type:'move',uci:'e2e5'})).status,400);const a=await f.action('alice',id,{type:'move',uci:'e2e4'});assert.equal(a.game.moves.length,1);const old=await f.call('bob','games/'+id+'/action',{type:'move',uci:'e7e5',revision:1});assert.equal(old.status,409);assert.equal((await f.action('bob',id,{type:'move',uci:'e7e5'})).game.moves.length,2);});
 test('concurrent move submissions apply at most once',async()=>{const f=fixture(),id=await f.start();const results=await Promise.all(['e2e4','d2d4'].map(uci=>f.call('alice','games/'+id+'/action',{type:'move',uci,revision:1})));assert.deepEqual(results.map(r=>r.status).sort(),[200,409]);assert.equal((await f.call('alice','games/'+id)).game.moves.length,1);});
+test('an undo offer racing the opponent move keeps the clicked revision in either write order',async()=>{
+  for(const offerFirst of [false,true]){
+    const f=fixture(),id=await f.start();
+    const first=await f.action('alice',id,{type:'move',uci:'e2e4'}),revision=first.game.revision;
+    const offer=()=>f.call('alice','games/'+id+'/action',{type:'offer',kind:'undo',revision});
+    const move=()=>f.call('bob','games/'+id+'/action',{type:'move',uci:'e7e5',revision});
+    const outcomes=await Promise.all(offerFirst?[offer(),move()]:[move(),offer()]);
+    assert.deepEqual(outcomes.map(result=>result.status),[200,200]);
+    const latest=(await f.call('bob','games/'+id)).game;
+    assert.deepEqual(latest.moves,['e2e4','e7e5']);assert.equal(latest.request.ply,1);assert.match(latest.request.label,/백 폰 e2/);
+    const accepted=await f.action('bob',id,{type:'respond',requestId:latest.request.id,accept:true});
+    assert.equal(accepted.status,200);assert.deepEqual(accepted.game.moves,[]);assert.equal(accepted.game.turn,'w');
+  }
+});
+test('an in-flight undo offer uses server-held clocks and its original target after a reply',async()=>{
+  const f=fixture(),id=await f.start('invite','10+5');
+  f.tick(3000);const first=await f.action('alice',id,{type:'move',uci:'e2e4'});
+  f.tick(2000);await f.action('bob',id,{type:'move',uci:'e7e5'});
+  f.tick(1000);
+  const offered=await f.call('alice','games/'+id+'/action',{type:'offer',kind:'undo',revision:first.game.revision,ply:99,clock:{white:999999,black:999999}});
+  assert.equal(offered.status,200);assert.equal(offered.game.request.ply,1);
+  assert.equal(offered.game.request.clock,undefined);assert.equal(offered.game.undoPositions,undefined);
+  f.tick(4000);const accepted=await f.action('bob',id,{type:'respond',requestId:offered.game.request.id,accept:true});
+  assert.deepEqual(accepted.game.moves,[]);
+  assert.equal(accepted.game.clock.white,592000); // Requester keeps 3s + 5s spent; removed increment is not recovered.
+  assert.equal(accepted.game.clock.black,598000); // Recipient recovers the state before the racing reply, without its increment.
+});
+test('an undo offer can arrive just after a finishing move and still resume the clicked position',async()=>{
+  for(const ending of ['mate','repetition']){
+    const f=fixture(),id=await f.start();
+    const moves=ending==='mate'?['f2f3','e7e5','g2g4']:['g1f3','g8f6','f3g1','f6g8','g1f3','g8f6','f3g1'];
+    for(let i=0;i<moves.length;i++)await f.action(i%2?'bob':'alice',id,{type:'move',uci:moves[i]});
+    const before=(await f.call('alice','games/'+id)).game;
+    const end=await f.action('bob',id,{type:'move',uci:ending==='mate'?'d8h4':'f6g8'});assert.equal(end.game.status,'finished');
+    const offered=await f.call('alice','games/'+id+'/action',{type:'offer',kind:'undo',revision:before.revision});
+    assert.equal(offered.status,200);assert.equal(offered.game.request.ply,moves.length);
+    const accepted=await f.action('bob',id,{type:'respond',requestId:offered.game.request.id,accept:true});
+    assert.equal(accepted.game.status,'active');assert.deepEqual(accepted.game.moves,moves.slice(0,-1));
+  }
+});
+test('undo revision recovery never targets another history branch or bypasses pending/duplicate guards',async()=>{
+  const f=fixture(),id=await f.start();
+  const first=await f.action('alice',id,{type:'move',uci:'e2e4'}),revision=first.game.revision;
+  const offerBody={type:'offer',kind:'undo',revision};
+  const offer=await f.call('alice','games/'+id+'/action',offerBody);
+  assert.equal((await f.call('alice','games/'+id+'/action',offerBody)).status,409);
+  await f.action('bob',id,{type:'respond',requestId:offer.game.request.id,accept:false});
+  assert.equal((await f.call('alice','games/'+id+'/action',offerBody)).status,409);
+  await f.action('bob',id,{type:'move',uci:'e7e5'});
+  const next=await f.action('alice',id,{type:'offer',kind:'undo'});
+  await f.action('bob',id,{type:'respond',requestId:next.game.request.id,accept:true});
+  // The same board/ply exists again, but references predating the accepted undo are invalid.
+  assert.equal((await f.call('alice','games/'+id+'/action',offerBody)).status,409);
+  assert.equal((await f.call('eve','games/'+id+'/action',offerBody)).status,404);
+  assert.equal((await f.call('alice','games/'+id+'/action',{...offerBody,revision:999999})).status,409);
+});
 test('undo needs the opponent acceptance and restores exactly one ply and side to move',async()=>{const f=fixture(),id=await f.start();await f.action('alice',id,{type:'move',uci:'e2e4'});await f.action('bob',id,{type:'move',uci:'e7e5'});const offered=await f.action('alice',id,{type:'offer',kind:'undo'});assert.equal(offered.game.moves.length,2);assert.match(offered.game.request.label,/흑 폰 e7/);assert.equal((await f.action('alice',id,{type:'respond',requestId:offered.game.request.id,accept:true})).status,409);const accepted=await f.action('bob',id,{type:'respond',requestId:offered.game.request.id,accept:true});assert.deepEqual(accepted.game.moves,['e2e4']);assert.equal(accepted.game.turn,'b');const c=new Chess();c.move('e4');assert.equal(accepted.game.fen,c.fen());});
 test('declining or withdrawing undo leaves the board unchanged and rejects stale acceptance',async()=>{
   const f=fixture(),id=await f.start();await f.action('alice',id,{type:'move',uci:'e2e4'});
