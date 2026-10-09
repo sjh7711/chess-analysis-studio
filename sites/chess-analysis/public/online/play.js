@@ -27,8 +27,22 @@ function syncNoticePlacement(){
   const element=$('notice'),inGame=!$('room').hidden&&!$('game-area').hidden;
   if(inGame){if(element.parentElement!==$('room-overlays'))$('room-overlays').prepend(element);}
   else if(element.previousSibling!==noticeHome)noticeHome.after(element);
+  syncActionLayers();
 }
-function notice(text,error=false){$('notice-text').textContent=text;$('notice').classList.toggle('error',error);$('notice').hidden=!text;syncNoticePlacement();}
+function syncActionLayers(){
+  const hasRequest=!!game?.request,hasNotice=!$('notice').hidden&&$('notice').parentElement===$('room-overlays')&&(!hasRequest||$('notice').classList.contains('error'));
+  $('room-overlays').classList.toggle('has-request',hasRequest);$('pending-panel').inert=hasRequest||hasNotice;$('request-panel').inert=hasNotice;
+}
+function revealActionSlot(){
+  requestAnimationFrame(()=>requestAnimationFrame(()=>{
+    const content=document.querySelector('.room-sidebar-content'),slot=$('move-action-slot');
+    if($('room').hidden||$('game-area').hidden||content.scrollHeight<=content.clientHeight)return;
+    const bounds=content.getBoundingClientRect(),target=slot.getBoundingClientRect();
+    if(target.top<bounds.top)content.scrollTop-=bounds.top-target.top;
+    else if(target.bottom>bounds.bottom)content.scrollTop+=target.bottom-bounds.bottom;
+  }));
+}
+function notice(text,error=false){$('notice-text').textContent=text;$('notice').classList.toggle('error',error);$('notice').hidden=!text;syncNoticePlacement();if(text)revealActionSlot();}
 $('notice-dismiss').onclick=()=>notice('');
 async function api(path,body){
   const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),10000);
@@ -145,7 +159,7 @@ function renderRoom(){
   $('turn-caption').textContent=waiting?'친구가 참가하면 시작됩니다.':ended?'대국 종료 · '+resultLabel():game.status==='cancelled'?'취소된 대국입니다.':(game.turn===game.color?'내 차례입니다':'상대방의 차례입니다')+(game.check?' · 체크':'');
   $('turn-caption').classList.toggle('my-turn',active&&game.turn===game.color);
   $('turn-caption').classList.toggle('finished',ended);
-  if(ended){$('result-title').textContent=resultLabel();$('result-reason').textContent=game.reason;$('analyze-game-link').href='/?onlineGame='+game.id;}
+  if(ended){$('result-title').textContent=resultLabel();$('result-reason').textContent=game.reason;$('analyze-game-link').href='/?onlineGame='+game.id;for(const id of ['rematch-game','result-rematch']){$(id).textContent=`재대국 요청 · ${timeLabel(game.timeControl)}`;$(id).title='같은 상대·시간 규칙으로 백과 흑을 바꿔 요청합니다.';}}
   $('offer-undo').disabled=sending||!game.moves.length||!!game.request;$('offer-draw').disabled=sending||!!game.request;$('resign-game').disabled=sending;
   renderRequest();renderBoard();renderPending();
   const moves=game.history||[],viewed=reviewPly??moves.length;
@@ -166,6 +180,7 @@ function showHistory(ply){
 }
 function renderRequest(){
   const r=game.request;
+  const isNewRequest=r&&$('request-panel').dataset.requestId!==r.id;$('request-panel').dataset.requestId=r?.id||'';
   $('request-panel').hidden=!r;
   $('result-undo-panel').hidden=game.status!=='finished'||r?.kind!=='undo';
   if(!r)return;
@@ -177,8 +192,17 @@ function renderRequest(){
   $('result-undo-title').textContent=title;$('result-undo-description').textContent=description;
   $('result-undo-response').hidden=r.mine;$('result-withdraw-request').hidden=!r.mine;
   for(const id of ['accept-request','decline-request','withdraw-request','result-accept-undo','result-decline-undo','result-withdraw-request'])$(id).disabled=sending;
+  if(isNewRequest)revealActionSlot();
 }
-function renderPending(){$('pending-panel').hidden=!pending;$('pending-description').textContent=pending?`${names[pending.piece]} ${pending.from} → ${pending.to}${pending.promotion?' · '+names[pending.promotion]+' 승격':''}`:'';scheduleGameLayout();}
+function renderPending(){
+  const isNewMove=pending&&$('pending-panel').dataset.move!==pending.uci;$('pending-panel').dataset.move=pending?.uci||'';
+  $('pending-panel').hidden=mode!=='confirm';$('action-slot-empty').hidden=mode==='confirm';
+  $('pending-title').textContent=pending?'이 위치에 둘까요?':'이동 확인';
+  $('pending-description').textContent=pending?`${names[pending.piece]} ${pending.from} → ${pending.to}${pending.promotion?' · '+names[pending.promotion]+' 승격':''}`:'둘 위치를 선택하세요.';
+  $('confirm-move').disabled=$('cancel-move').disabled=!pending||sending;
+  syncActionLayers();scheduleGameLayout();
+  if(isNewMove)revealActionSlot();
+}
 function renderBoard(){
   if(!game?.color)return;
   const key=JSON.stringify([game.id,game.moves,flipped,selected,pending?.uci,reviewPly]);if(boardKey===key)return;boardKey=key;
@@ -252,6 +276,16 @@ for(const id of ['decline-request','result-decline-undo'])$(id).onclick=()=>resp
 for(const id of ['withdraw-request','result-withdraw-request'])$(id).onclick=()=>{if(game?.request)void action({type:'withdraw'});};
 $('action-confirm').onclick=async()=>{const fn=dialogAction;dialogAction=null;$('action-dialog').close();try{await fn?.();}catch(error){notice(error.message,true);}};$('action-cancel').onclick=()=>{$('action-dialog').close();dialogAction=null;};
 $('download-pgn').onclick=savePgn;
+for(const id of ['rematch-game','result-rematch'])$(id).onclick=event=>runButton(event.currentTarget,async()=>{
+  if(game?.status!=='finished')return;
+  $('rematch-game').disabled=$('result-rematch').disabled=true;
+  try{const data=await api('games',{rematchOf:game.id});await openRoom(data.game.id);}catch(error){$('game-result-dialog').close();throw error;}finally{$('rematch-game').disabled=$('result-rematch').disabled=false;}
+});
+for(const prefix of ['friend','invite'])$(`${prefix}-time-options`).addEventListener('click',event=>{
+  const button=event.target.closest('[data-time-control]');if(!button)return;
+  $(`${prefix}-time`).value=button.dataset.timeControl;
+  for(const option of $(`${prefix}-time-options`).querySelectorAll('[data-time-control]'))option.setAttribute('aria-pressed',String(option===button));
+});
 $('show-result').onclick=showGameResult;
 $('close-result').onclick=closeGameResult;
 $('review-finished-game').onclick=()=>{closeGameResult();if(!$('history-prev').disabled)$('history-prev').focus({preventScroll:true});};
@@ -321,7 +355,11 @@ function fitGameLayout(){
   const contentHeight=visible.reduce((sum,node)=>sum+node.offsetHeight,0)+Math.max(0,visible.length-1)*parseFloat(getComputedStyle(content).gap);
   const actionsHeight=$('game-actions').hidden?0:$('game-actions').offsetHeight+parseFloat(getComputedStyle(sidebar).gap);
   const controlsHeight=stacked?contentHeight+actionsHeight:0;
-  const boardSize=Math.max(0,Math.floor(Math.min(stacked?availableWidth:availableWidth-sidebarWidth-gap,availableHeight-playerHeight-(stacked?controlsHeight+gap:0))));
+  const naturalBoardSize=Math.max(0,Math.floor(Math.min(stacked?availableWidth:availableWidth-sidebarWidth-gap,availableHeight-playerHeight-(stacked?controlsHeight+gap:0))));
+  // On short phones, scroll the controls instead of shrinking the board to a thumbnail.
+  const minimumBoardSize=stacked?Math.max(0,Math.min(200,availableWidth,availableHeight-playerHeight-gap-128)):0;
+  document.body.classList.toggle('compact-game-controls',stacked&&naturalBoardSize<minimumBoardSize);
+  const boardSize=Math.max(naturalBoardSize,minimumBoardSize);
   area.style.setProperty('--game-height',availableHeight+'px');
   area.style.setProperty('--board-size',boardSize+'px');
   area.style.setProperty('--sidebar-width',sidebarWidth+'px');

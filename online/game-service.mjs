@@ -134,6 +134,18 @@ export async function handleGameRequest(request,db,{now=Date.now,undoRetries=2}=
       const history=await historyPage();return json({profile:profileView(profile),friends:await friendsList(),games:[...games,...history.games],nextCursor:history.nextCursor});
     }
     if(path[0]==='games'&&path.length===1&&method==='POST'){
+      // Derive rematch settings from a finished game owned by this participant.
+      if(body.rematchOf!==undefined){
+        if(typeof body.rematchOf!=='string'||!/^[a-f0-9]{32}$/.test(body.rematchOf))fail(400,'재대국할 경기 기록을 확인해 주세요.');
+        const previous=await db.prepare('SELECT * FROM games WHERE id=?').bind(body.rematchOf).first();
+        if(!previous||(previous.owner_user!==user&&previous.guest_user!==user))fail(404,'재대국할 경기 기록을 찾을 수 없습니다.');
+        if(previous.status!=='finished'||!previous.guest_user)fail(409,'종료된 대국에서만 재대국을 요청할 수 있습니다.');
+        const previousState=JSON.parse(previous.state_json),opponent=previous.owner_user===user?previous.guest_user:previous.owner_user;
+        const target=await db.prepare('SELECT p.* FROM players p JOIN accounts a ON a.user_id=p.user_id WHERE p.user_id=?').bind(opponent).first();
+        if(!target)fail(404,'상대방 계정을 찾을 수 없습니다.');
+        if(!TIME_CONTROLS[previousState.timeControl])fail(400,'이 경기의 시간 규칙으로 재대국할 수 없습니다.');
+        body.mode='friend';body.color=previousState.whiteUser===user?'b':'w';body.timeControl=previousState.timeControl;body.friendCode=target.friend_code;
+      }
       if(!['invite','friend'].includes(body.mode)||!['w','b','random'].includes(body.color))fail(400,'대국 설정을 확인해 주세요.');
       const control=TIME_CONTROLS[body.timeControl||'10'];if(!control)fail(400,'지원하는 대국 시간을 선택해 주세요.');
       const recent=await db.prepare('SELECT COUNT(*) AS count FROM games WHERE owner_user=? AND created_at>?').bind(user,now()-60000).first();

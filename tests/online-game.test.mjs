@@ -163,6 +163,31 @@ test('undo acceptance racing a subsequent move still reaches the request-time bo
 });
 test('server rejects cross-origin changes and accidental self invitations',async()=>{const f=fixture();await f.players();assert.equal((await f.call('alice','me',{nickname:'변경'},{Origin:'https://evil.test'})).status,403);const p=await f.call('alice','me');assert.equal((await f.call('alice','games',{mode:'friend',color:'w',friendCode:p.profile.friendCode})).status,400);});
 test('exactly the six requested time controls are accepted',async()=>{for(const [preset,minutes,increment]of [['10',10,0],['10+5',10,5],['15+10',15,10],['20',20,0],['30',30,0],['60',60,0]]){const f=fixture(),id=await f.start('invite',preset),g=(await f.call('alice','games/'+id)).game;assert.equal(g.clock.white,minutes*60000);assert.equal(g.clock.black,minutes*60000);assert.equal(g.clock.increment,increment*1000);assert.equal((await f.call('alice','games',{mode:'invite',color:'w',timeControl:'3+2'})).status,400);}});
+test('either player can request a rematch with the same clock rules, swapped colors and untouched history',async()=>{
+  for(const preset of ['10','10+5','15+10','20','30','60'])for(const requester of ['alice','bob']){
+    const f=fixture(),id=await f.start('invite',preset);f.tick(2500);await f.action('alice',id,{type:'move',uci:'e2e4'});await f.action('bob',id,{type:'resign'});
+    const original=f.sqlite.prepare('SELECT * FROM games WHERE id=?').get(id),oldState=JSON.parse(original.state_json),opponent=requester==='alice'?'bob':'alice';
+    const eve=(await f.call('eve','me')).profile;
+    const created=await f.call(requester,'games',{rematchOf:id,mode:'invite',timeControl:'60',color:'random',friendCode:eve.friendCode});
+    assert.equal(created.status,201);assert.notEqual(created.game.id,id);assert.equal(created.game.mode,'friend');assert.equal(created.game.status,'waiting');assert.equal(created.game.timeControl,preset);
+    assert.equal(created.game.color,requester==='alice'?'b':'w');assert.deepEqual(created.game.moves,[]);assert.equal(created.game.clock.startedAt,null);
+    assert.equal(created.game.clock.white,oldState.clock.initial);assert.equal(created.game.clock.black,oldState.clock.initial);assert.equal(created.game.clock.increment,oldState.clock.increment);
+    assert.deepEqual(f.sqlite.prepare('SELECT * FROM games WHERE id=?').get(id),original);
+    assert.equal((await f.call(opponent,'invitations')).invitations[0].id,created.game.id);assert.equal((await f.call('eve','games/'+created.game.id)).status,404);
+    assert.equal((await f.call(requester,'games',{rematchOf:id})).status,409);
+    const joined=await f.call(opponent,'games/'+created.game.id+'/join',{});assert.equal(joined.status,200);assert.equal(joined.game.status,'active');assert.equal(joined.game.color,requester==='alice'?'w':'b');
+    assert.equal(joined.game.clock.white,oldState.clock.initial);assert.equal(joined.game.clock.black,oldState.clock.initial);
+  }
+});
+test('rematch creation rejects unfinished games, outsiders, missing games and malformed IDs',async()=>{
+  const f=fixture(),id=await f.start();
+  assert.equal((await f.call('alice','games',{rematchOf:id})).status,409);
+  await f.action('bob',id,{type:'resign'});
+  assert.equal((await f.call('eve','games',{rematchOf:id})).status,404);
+  assert.equal((await f.call(null,'games',{rematchOf:id})).status,401);
+  assert.equal((await f.call('alice','games',{rematchOf:'0'.repeat(32)})).status,404);
+  for(const invalid of [null,{},'bad-id'])assert.equal((await f.call('alice','games',{rematchOf:invalid})).status,400);
+});
 test('only side to move loses time; increment applies once and PGN retains time control',async()=>{const f=fixture(),id=await f.start('invite','10+5');f.tick(3000);const g=(await f.action('alice',id,{type:'move',uci:'e2e4'})).game;assert.equal(g.clock.white,602000);assert.equal(g.clock.black,600000);f.tick(2000);const after=(await f.call('alice','games/'+id)).game;assert.equal(after.clock.white,602000);assert.equal(after.clock.black,598000);const end=(await f.action('bob',id,{type:'resign'})).game;assert.ok(end.pgn.includes('[TimeControl "600+5"]'));f.tick(20000);assert.deepEqual((await f.call('alice','games/'+id)).game.clock,end.clock);});
 test('undo keeps requester elapsed time and removes the restored move increment',async()=>{const f=fixture(),id=await f.start('invite','10+5');f.tick(3000);await f.action('alice',id,{type:'move',uci:'e2e4'});f.tick(2000);await f.action('bob',id,{type:'move',uci:'e7e5'});f.tick(1000);const offered=await f.action('alice',id,{type:'offer',kind:'undo'});f.tick(1000);const undone=(await f.action('bob',id,{type:'respond',requestId:offered.game.request.id,accept:true})).game;assert.equal(undone.clock.white,600000);assert.equal(undone.clock.black,598000);assert.equal(undone.turn,'b');f.tick(2000);assert.equal((await f.call('alice','games/'+id)).game.clock.black,596000);});
 test('server declares time loss even without a client timeout message and refuses a late move',async()=>{const f=fixture(),id=await f.start();f.tick(600001);const late=await f.call('alice','games/'+id+'/action',{type:'move',uci:'e2e4',revision:1});assert.equal(late.status,409);const end=(await f.call('bob','games/'+id)).game;assert.equal(end.status,'finished');assert.equal(end.result,'0-1');assert.equal(end.reason,'백 시간 초과');assert.equal(end.moves.length,0);assert.equal(end.clock.white,0);});
