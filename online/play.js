@@ -8,6 +8,7 @@ import '../src/piece-settings.js';
 
 const $=id=>document.getElementById(id), esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const noticeHome=document.createComment('notice lobby position');$('notice').before(noticeHome);
+const roomDialogHomes=['action-dialog','promotion-dialog','game-result-dialog'].map(id=>{const node=$(id),home=document.createComment(id+' default position');node.before(home);node.addEventListener('close',syncActionLayers);return{node,home};});
 const names={p:'폰',n:'나이트',b:'비숍',r:'룩',q:'퀸',k:'킹'};
 const moveSounds=new MoveSounds({button:$('move-sound')});
 let me,game,roomId=new URL(location.href).searchParams.get('room'),inviteToken=new URLSearchParams(location.hash.slice(1)).get('invite')||'',selected=null,pending=null,promoting=null,sending=false,flipped=false,pollTimer,refreshBusy=false,rendered=null,boardKey='',drag=null,suppressClick=0,dialogAction=null;
@@ -26,13 +27,20 @@ const displayedChess=()=>chessFor({...game,moves:game.moves.slice(0,reviewPly??g
 function syncNoticePlacement(){
   const element=$('notice'),inGame=!$('room').hidden&&!$('game-area').hidden;
   if(inGame){if(element.parentElement!==$('room-overlays'))$('room-overlays').prepend(element);}
-  else if(element.previousSibling!==noticeHome)noticeHome.after(element);
+  else{if(element.previousSibling!==noticeHome)noticeHome.after(element);element.inert=false;element.classList.remove('covered-alert');}
+  for(const {node,home} of roomDialogHomes){if(inGame){if(node.parentElement!==$('room-overlays'))$('room-overlays').append(node);}else{if(node.previousSibling!==home){node.close();home.after(node);}node.inert=false;node.classList.remove('covered-alert');}}
+  window.dispatchEvent(new Event('room-alert-placement'));
   syncActionLayers();
 }
 function syncActionLayers(){
-  const hasRequest=!!game?.request,hasNotice=!$('notice').hidden&&$('notice').parentElement===$('room-overlays')&&(!hasRequest||$('notice').classList.contains('error'));
-  $('room-overlays').classList.toggle('has-request',hasRequest);$('pending-panel').inert=hasRequest||hasNotice;$('request-panel').inert=hasNotice;
+  const tray=$('room-overlays'),isVisible=node=>node&&node.parentElement===tray&&(node.tagName==='DIALOG'?node.open:!node.hidden);
+  const order=[$('promotion-dialog'),$('action-dialog'),$('notice').classList.contains('error')?$('notice'):null,$('request-panel'),$('invitation-tray'),$('game-result-dialog'),$('notice')];
+  const front=order.find(isVisible);
+  for(const node of tray.children){const covered=isVisible(node)&&node!==front;node.classList.toggle('covered-alert',covered);node.inert=covered;}
+  $('pending-panel').inert=false;
 }
+window.addEventListener('invitation-tray-changed',syncActionLayers);
+function showRoomDialog(id){syncNoticePlacement();const dialog=$(id);if(!dialog.open){if(dialog.parentElement===$('room-overlays'))dialog.show();else dialog.showModal();}syncActionLayers();}
 function revealActionSlot(){
   requestAnimationFrame(()=>requestAnimationFrame(()=>{
     const content=document.querySelector('.room-sidebar-content'),slot=$('move-action-slot');
@@ -42,7 +50,7 @@ function revealActionSlot(){
     else if(target.bottom>bounds.bottom)content.scrollTop+=target.bottom-bounds.bottom;
   }));
 }
-function notice(text,error=false){$('notice-text').textContent=text;$('notice').classList.toggle('error',error);$('notice').hidden=!text;syncNoticePlacement();if(text)revealActionSlot();}
+function notice(text,error=false){$('notice-text').textContent=text;$('notice').classList.toggle('error',error);$('notice').hidden=!text;syncNoticePlacement();}
 $('notice-dismiss').onclick=()=>notice('');
 async function api(path,body){
   const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),10000);
@@ -87,8 +95,10 @@ function acceptState(next){
   }
   if(game?.id!==next.id||(!game?.color&&next.color)){rendered=null;reviewPly=null;flipped=next.color==='b';}
   if(reviewPly!==null&&reviewPly>=next.moves.length)reviewPly=null;
-  if(pending||promoting){pending=null;promoting=null;$('promotion-dialog').close();notice('대국 상태가 변경되어 이동 선택을 취소했습니다.');}
-  cleanupDrag();selected=null;game=next;
+  const positionChanged=game?.id!==next.id||game?.status!==next.status||JSON.stringify(game?.moves)!==JSON.stringify(next.moves);
+  if(positionChanged){if(pending||promoting){pending=null;promoting=null;$('promotion-dialog').close();notice('대국 상태가 변경되어 이동 선택을 취소했습니다.');}cleanupDrag();selected=null;}
+  else{if(pending)pending.revision=next.revision;if(promoting)promoting.revision=next.revision;}
+  game=next;
   if(next.status==='finished'){
     dialogAction=null;$('action-dialog').close();
     if(!presentedResults.has(next.id))reviewPly=null;
@@ -112,7 +122,7 @@ function showGameResult(){
   $('result-black-score').textContent=draw?'½':winner==='b'?'1':'0';
   $('result-analyze-link').href='/?onlineGame='+game.id;
   presentedResults.add(game.id);
-  if(!dialog.open)dialog.showModal();
+  showRoomDialog('game-result-dialog');
 }
 function closeGameResult(){
   $('game-result-dialog').close();
@@ -145,7 +155,7 @@ setInterval(renderClocks,200);
 function renderRoom(){
   $('lobby').hidden=true;$('room').hidden=false;
   $('join-panel').hidden=!!game.color;$('game-area').hidden=!game.color;
-  if(!game.color){$('join-title').textContent=game.status==='waiting'?`${game.host}님과 ${timeLabel(game.timeControl)} 대국할까요?`:'이미 시작되었거나 종료된 대국입니다.';$('join-game').disabled=!game.canJoin;return;}
+  if(!game.color){$('join-title').textContent=game.status==='waiting'?`${game.host}님과 ${timeLabel(game.timeControl)} 대국할까요?`:'이미 시작되었거나 종료된 대국입니다.';$('join-game').disabled=!game.canJoin;scheduleGameLayout();return;}
   const active=game.status==='active',waiting=game.status==='waiting',ended=game.status==='finished';
   $('waiting-panel').hidden=!waiting;$('result-panel').hidden=!ended;$('game-actions').hidden=!active;
   $('waiting-text').textContent=game.mode==='friend'?'상대방이 대국함에서 요청을 수락하면 시작합니다.':'초대 링크로 참가한 첫 번째 친구와 대국합니다.';
@@ -180,10 +190,10 @@ function showHistory(ply){
 }
 function renderRequest(){
   const r=game.request;
-  const isNewRequest=r&&$('request-panel').dataset.requestId!==r.id;$('request-panel').dataset.requestId=r?.id||'';
+  $('request-panel').dataset.requestId=r?.id||'';
   $('request-panel').hidden=!r;
   $('result-undo-panel').hidden=game.status!=='finished'||r?.kind!=='undo';
-  if(!r)return;
+  if(!r){syncActionLayers();return;}
   const title=r.mine?'상대방의 응답을 기다립니다':r.kind==='undo'?'한 수 무르기 요청':'무승부 요청';
   const later=Math.max(0,game.moves.length-r.ply);
   const description=r.kind==='undo'?`${r.label} 직전으로 돌아갑니다.${later?` 요청 이후 둔 ${later}번의 이동도 취소됩니다.`:''} 요청받은 사람의 시간은 요청 시점으로 복구하고, 요청한 사람의 사용 시간은 유지합니다. 취소한 수의 추가 시간은 회수합니다.`:'수락하면 이 대국은 무승부로 끝납니다. 응답 중에도 시간은 흐릅니다.';
@@ -192,11 +202,12 @@ function renderRequest(){
   $('result-undo-title').textContent=title;$('result-undo-description').textContent=description;
   $('result-undo-response').hidden=r.mine;$('result-withdraw-request').hidden=!r.mine;
   for(const id of ['accept-request','decline-request','withdraw-request','result-accept-undo','result-decline-undo','result-withdraw-request'])$(id).disabled=sending;
-  if(isNewRequest)revealActionSlot();
+  syncActionLayers();
 }
 function renderPending(){
   const isNewMove=pending&&$('pending-panel').dataset.move!==pending.uci;$('pending-panel').dataset.move=pending?.uci||'';
   $('pending-panel').hidden=mode!=='confirm';$('action-slot-empty').hidden=mode==='confirm';
+  $('move-action-slot').hidden=game?.status!=='active';
   $('pending-title').textContent=pending?'이 위치에 둘까요?':'이동 확인';
   $('pending-description').textContent=pending?`${names[pending.piece]} ${pending.from} → ${pending.to}${pending.promotion?' · '+names[pending.promotion]+' 승격':''}`:'둘 위치를 선택하세요.';
   $('confirm-move').disabled=$('cancel-move').disabled=!pending||sending;
@@ -209,7 +220,7 @@ function renderBoard(){
   const c=displayedChess(),snapshot=pieceSnapshot(c),board=$('online-board'),last=c.history({verbose:true}).at(-1);
   let preview=c;if(pending){preview=new Chess(c.fen());preview.move(pending.uci);}
   const squares=[];for(let row=0;row<8;row++)for(let col=0;col<8;col++){
-    const file=flipped?7-col:col,rank=flipped?row+1:8-row,square=String.fromCharCode(97+file)+rank,piece=preview.get(square),dark=(file+rank)%2===0;
+    const file=flipped?7-col:col,rank=flipped?row+1:8-row,square=String.fromCharCode(97+file)+rank,piece=preview.get(square),dark=(file+rank)%2===1;
     squares.push(`<button class="online-square${dark?' dark':''}${last&&(last.from===square||last.to===square)?' last':''}${piece?.type==='k'&&piece.color===c.turn()&&c.isCheck()?' check':''}${pending?.to===square?' pending':''}" data-square="${square}" role="gridcell" aria-label="${square} ${piece?(piece.color==='w'?'백':'흑')+' '+names[piece.type]:'빈 칸'}">${piece?pieceSvg(piece.type,piece.color):''}${row===7?`<span class="file">${String.fromCharCode(97+file)}</span>`:''}${col===0?`<span class="rank">${rank}</span>`:''}</button>`);
   }
   board.innerHTML=squares.join('');
@@ -239,13 +250,13 @@ function paintMoveHints(from){
 function choose(square){if(!canInteract())return;if(pending){const picked=pickedPiece(square);if(!picked)return;cancelPendingForSelection();selected=picked.from;renderBoard();return;}const c=chessFor(game),piece=c.get(square);if(selected&&selected!==square){if(c.moves({square:selected,verbose:true}).some(m=>m.to===square)){stageMove(selected,square);return;}}selected=piece?.color===game.color?(selected===square?null:square):null;renderBoard();}
 function stageMove(from,to,promotion){
   if(!canMove())return;const c=chessFor(game),choices=c.moves({square:from,verbose:true}).filter(m=>m.to===to);if(!choices.length){selected=null;renderBoard();return;}
-  if(choices.some(m=>m.promotion)&&!promotion){promoting={from,to,revision:game.revision};for(const b of $('promotion-options').children)b.innerHTML=pieceSvg(b.dataset.promotion,game.color)+`<span>${names[b.dataset.promotion]}</span>`;$('promotion-dialog').showModal();return;}
+  if(choices.some(m=>m.promotion)&&!promotion){promoting={from,to,revision:game.revision};for(const b of $('promotion-options').children)b.innerHTML=pieceSvg(b.dataset.promotion,game.color)+`<span>${names[b.dataset.promotion]}</span>`;showRoomDialog('promotion-dialog');return;}
   const uci=from+to+(promotion||''),move=c.move(uci);selected=null;
   if(mode==='confirm'){pending={...move,uci,revision:game.revision};renderBoard();renderPending();}else void action({type:'move',uci});
 }
 async function action(body){if(sending)return;sending=true;renderPending();renderRequest();$('confirm-move').disabled=true;try{const {game:next}=await api('games/'+roomId+'/action',{revision:game.revision,...body});pending=null;notice('');acceptState(next);}catch(error){pending=null;notice(error.message,true);await refresh();renderBoard();renderPending();}finally{sending=false;$('confirm-move').disabled=false;if(game?.color)renderRoom();}}
 async function openRoom(id){$('game-result-dialog').close();cleanupDrag();pending=null;promoting=null;selected=null;game=null;rendered=null;roomId=id;inviteToken='';history.pushState(null,'','/play?room='+id);notice('');await refresh();}
-function ask(title,description,fn){$('action-title').textContent=title;$('action-description').textContent=description;dialogAction=fn;$('action-dialog').showModal();}
+function ask(title,description,fn){$('action-title').textContent=title;$('action-description').textContent=description;dialogAction=fn;showRoomDialog('action-dialog');}
 async function runButton(button,fn){if(button.disabled)return;button.disabled=true;try{await fn();}catch(error){notice(error.message,true);}finally{button.disabled=false;}}
 async function copy(text){try{await navigator.clipboard.writeText(text);notice('복사했습니다. 친구에게 보내 주세요.');}catch{notice('복사하지 못했습니다. 표시된 코드를 직접 선택해 복사해 주세요.',true);}}
 function savePgn(){if(!game?.pgn)return;const url=URL.createObjectURL(new Blob([game.pgn],{type:'application/x-chess-pgn'})),a=document.createElement('a');a.href=url;a.download='friendly-chess-'+game.id.slice(0,8)+'.pgn';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
@@ -278,6 +289,12 @@ for(const id of ['accept-request','result-accept-undo'])$(id).onclick=()=>respon
 for(const id of ['decline-request','result-decline-undo'])$(id).onclick=()=>respondToRequest(false);
 for(const id of ['withdraw-request','result-withdraw-request'])$(id).onclick=()=>{if(game?.request)void action({type:'withdraw'});};
 $('action-confirm').onclick=async()=>{const fn=dialogAction;dialogAction=null;$('action-dialog').close();try{await fn?.();}catch(error){notice(error.message,true);}};$('action-cancel').onclick=()=>{$('action-dialog').close();dialogAction=null;};
+$('action-dialog').addEventListener('cancel',()=>{dialogAction=null;});
+document.addEventListener('keydown',event=>{
+  if(event.key!=='Escape'||document.querySelector('dialog:modal'))return;
+  const dialog=$('room-overlays').querySelector('dialog[open]:not(.covered-alert)');
+  if(dialog){event.preventDefault();if(dialog.dispatchEvent(new Event('cancel',{cancelable:true})))dialog.close();}
+});
 $('download-pgn').onclick=savePgn;
 for(const id of ['rematch-game','result-rematch'])$(id).onclick=event=>runButton(event.currentTarget,async()=>{
   if(game?.status!=='finished')return;

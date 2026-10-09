@@ -83,7 +83,7 @@ function mountInvitations() {
   function render(inbox) {
     const count = inbox.invitations.length, ids = new Set(inbox.invitations.map(item => item.id));
     const fresh = inbox.invitations.filter(item => !previousIds.has(item.id));
-    if (fresh.length) announcement.textContent = `${fresh.map(item => item.host).join(', ')}님이 대국을 요청했습니다. 우측 상단에서 수락할 수 있습니다.`;
+    if (fresh.length) announcement.textContent = `${fresh.map(item => item.host).join(', ')}님이 대국을 요청했습니다. 상단 안내에서 수락할 수 있습니다.`;
     previousIds = ids;
     notificationCenter?.updateInvitations(inbox.accountKey,inbox.recentInvitations,inbox.invitations);
     for (const [id, card] of cards) if (!ids.has(id)) { card.node.remove(); cards.delete(id); }
@@ -112,17 +112,22 @@ function mountInvitations() {
     message.textContent = inbox.message; message.hidden = !inbox.message;
     // Connection failures with no pending requests should not obstruct the board.
     tray.hidden = !count;
+    window.dispatchEvent(new Event('invitation-tray-changed'));
     if (!count && inbox.message && !inbox.message.startsWith('연결')) announcement.textContent = inbox.message;
   }
   const inbox = new InvitationInbox({onChange: render, onAccepted: id => location.assign('/play?room=' + encodeURIComponent(id))});
   const header = document.querySelector('.topbar, .play-header');
   const positionTray = () => {
+    const rail=document.getElementById('room-overlays'),inGame=rail&&!document.getElementById('room')?.hidden&&!document.getElementById('game-area')?.hidden;
+    const parent=inGame?rail:document.body;
+    if(tray.parentElement!==parent){parent.append(tray);tray.classList.remove('covered-alert');tray.inert=false;window.dispatchEvent(new Event('invitation-tray-changed'));}
     const bottom = Math.max(0, header.getBoundingClientRect().bottom);
     tray.style.setProperty('--invitation-top', Math.min(bottom + 12, innerHeight * .4) + 'px');
   };
   new ResizeObserver(positionTray).observe(header);
   window.addEventListener('scroll', positionTray, {passive: true});
   window.addEventListener('resize', positionTray); positionTray();
+  window.addEventListener('room-alert-placement',positionTray);
   let timer, polling = false, stopped = false;
   async function poll() {
     clearTimeout(timer);
