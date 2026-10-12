@@ -197,7 +197,9 @@ function renderRequest(){
   const title=r.mine?'상대방의 응답을 기다립니다':r.kind==='undo'?'한 수 무르기 요청':'무승부 요청';
   const later=Math.max(0,game.moves.length-r.ply);
   const description=r.kind==='undo'?`${r.label} 직전으로 돌아갑니다.${later?` 요청 이후 둔 ${later}번의 이동도 취소됩니다.`:''} 요청받은 사람의 시간은 요청 시점으로 복구하고, 요청한 사람의 사용 시간은 유지합니다. 취소한 수의 추가 시간은 회수합니다.`:'수락하면 이 대국은 무승부로 끝납니다. 응답 중에도 시간은 흐릅니다.';
-  $('request-title').textContent=title;$('request-description').textContent=description;
+  $('request-title').textContent=title;
+  $('request-description').textContent=r.kind==='undo'?`${r.label} 직전으로${later?` · 이후 ${later}수도 취소`:''} · ${r.mine?'상대':'내'} 시간 복구`:description;
+  $('request-description').title=description;$('request-description').setAttribute('aria-label',description);
   $('request-response').hidden=r.mine;$('withdraw-request').hidden=!r.mine;
   $('result-undo-title').textContent=title;$('result-undo-description').textContent=description;
   $('result-undo-response').hidden=r.mine;$('result-withdraw-request').hidden=!r.mine;
