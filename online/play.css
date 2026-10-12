@@ -120,7 +120,7 @@
   .identity-bar{align-items:center}.identity-bar>div{min-width:0}.identity-bar>div strong{overflow-wrap:anywhere}
 }
 
-/* Result content is also used by the compact banner above the board. */
+/* Game-end results stay in a centered modal, separate from the notice rail. */
 .game-result-dialog{padding:0;width:calc(100% - 32px);max-width:440px;max-height:calc(100dvh - 32px);border:1px solid #d4dec9;border-radius:20px;background:#fcfdf9;box-shadow:0 24px 90px #142a3659;overflow:auto;text-align:center;overscroll-behavior:contain}
 .game-result-dialog::backdrop{background:#172d25b8;backdrop-filter:blur(3px)}
 .game-result-dialog[open]{animation:result-arrive .28s ease-out both}
@@ -242,15 +242,6 @@
 #room-overlays .promotion-options{margin:0;gap:5px}
 #room-overlays .promotion-options button{display:flex;align-items:center;justify-content:center;gap:2px;min-width:44px;min-height:40px;padding:2px;font-size:11px;line-height:1.2}
 #room-overlays .promotion-options svg{width:26px;height:26px}
-#room-overlays>#game-result-dialog[open]{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:12px;padding:5px 46px 5px 12px;border-left:5px solid var(--ui-accent,#24543e);animation:none}
-#room-overlays .result-hero{padding:0;background:none!important;border:0}
-#room-overlays .result-kicker{display:none}
-#room-overlays .result-hero h2{font-size:18px;letter-spacing:0;line-height:1.25}
-#room-overlays .result-reason{margin:2px 0 0;font-size:12px;max-height:20px;overflow:auto}
-#room-overlays :is(.result-emblem,.result-scoreboard,.result-saved,.result-undo-panel,#review-finished-game){display:none}
-#room-overlays .result-body{display:flex;gap:6px;padding:0;align-items:center}
-#room-overlays .result-body>.button{width:auto;min-height:38px;margin:0;padding:6px 10px;font-size:12px}
-#room-overlays .result-close{top:calc(50% - 15px);right:8px;width:30px;height:30px;border-radius:5px}
 #room-overlays>.invitation-tray{position:relative;top:auto;right:auto;display:flex;max-height:100%;font-size:12px}
 #room-overlays .invitation-heading,#room-overlays .invitation-description{display:none}
 #room-overlays .invitation-list{flex:1;min-height:0}
@@ -274,11 +265,6 @@
   #room-overlays #promotion-cancel{grid-column:2;grid-row:1}
   #room-overlays .promotion-options button{display:flex;align-items:center;justify-content:center;gap:2px;min-width:0;min-height:38px}
   #room-overlays .promotion-options svg{width:26px;height:26px}
-  #room-overlays>#game-result-dialog[open]{padding:5px 40px 5px 8px;gap:6px}
-  #room-overlays .result-hero h2{font-size:15px}
-  #room-overlays .result-body{flex-direction:row;gap:4px;width:132px;max-width:132px}
-  #room-overlays .result-body>.button{flex:1;min-width:0;width:auto;min-height:38px;padding:4px 6px;font-size:11px;line-height:1.25}
-  #room-overlays .result-body>#result-rematch{flex:1.8}
   #room-overlays .invitation-card{padding:6px 8px;gap:0 6px}
   #room-overlays .invitation-name{font-size:13px}
   #room-overlays .invitation-actions{gap:4px}

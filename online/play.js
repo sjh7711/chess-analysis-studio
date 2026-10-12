@@ -8,7 +8,7 @@ import '../src/piece-settings.js';
 
 const $=id=>document.getElementById(id), esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const noticeHome=document.createComment('notice lobby position');$('notice').before(noticeHome);
-const roomDialogHomes=['action-dialog','promotion-dialog','game-result-dialog'].map(id=>{const node=$(id),home=document.createComment(id+' default position');node.before(home);node.addEventListener('close',syncActionLayers);return{node,home};});
+const roomDialogHomes=['action-dialog','promotion-dialog'].map(id=>{const node=$(id),home=document.createComment(id+' default position');node.before(home);node.addEventListener('close',syncActionLayers);return{node,home};});
 const names={p:'폰',n:'나이트',b:'비숍',r:'룩',q:'퀸',k:'킹'};
 const moveSounds=new MoveSounds({button:$('move-sound')});
 let me,game,roomId=new URL(location.href).searchParams.get('room'),inviteToken=new URLSearchParams(location.hash.slice(1)).get('invite')||'',selected=null,pending=null,promoting=null,sending=false,flipped=false,pollTimer,refreshBusy=false,rendered=null,boardKey='',drag=null,suppressClick=0,dialogAction=null;
@@ -34,7 +34,7 @@ function syncNoticePlacement(){
 }
 function syncActionLayers(){
   const tray=$('room-overlays'),isVisible=node=>node&&node.parentElement===tray&&(node.tagName==='DIALOG'?node.open:!node.hidden);
-  const order=[$('promotion-dialog'),$('action-dialog'),$('notice').classList.contains('error')?$('notice'):null,$('request-panel'),$('invitation-tray'),$('game-result-dialog'),$('notice')];
+  const order=[$('promotion-dialog'),$('action-dialog'),$('notice').classList.contains('error')?$('notice'):null,$('request-panel'),$('invitation-tray'),$('notice')];
   const front=order.find(isVisible);
   for(const node of tray.children){const covered=isVisible(node)&&node!==front;node.classList.toggle('covered-alert',covered);node.inert=covered;}
   $('pending-panel').inert=false;
@@ -122,7 +122,7 @@ function showGameResult(){
   $('result-black-score').textContent=draw?'½':winner==='b'?'1':'0';
   $('result-analyze-link').href='/?onlineGame='+game.id;
   presentedResults.add(game.id);
-  showRoomDialog('game-result-dialog');
+  if(!dialog.open)dialog.showModal();
 }
 function closeGameResult(){
   $('game-result-dialog').close();
