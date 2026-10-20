@@ -395,7 +395,9 @@ main{width:100%;flex:none;padding-bottom:24px}
 #chart-dock .analysis-progress{width:100%;margin:7px 0 10px}
 #chart-dock .analysis-progress>div{font-size:13px}
 #chart-dock .analysis-progress progress{height:4px;width:100%}
-.move-coach{display:flex;flex-direction:column;padding:12px 14px;background:#f1f6e9;border:1px solid #dce6ce;border-radius:8px;height:142px}
+.move-coach{display:flex;flex-direction:column;padding:12px 14px;background:#f1f6e9;border:1px solid #dce6ce;border-radius:8px;height:300px}
+.coach-display-options{display:flex;justify-content:flex-end;align-items:center;flex:none;margin-top:9px;padding-top:8px;border-top:1px solid var(--ui-border,#dce6ce)}
+.coach-display-options .arrow-option{cursor:pointer;color:var(--ui-muted,#617656)}
 .coach-heading{display:flex;align-items:center;gap:9px;min-width:0}
 .coach-heading h3{font-size:17px;margin:0;font-weight:700;color:#345135;min-width:0;line-height:1.4;word-break:keep-all;overflow-wrap:anywhere}
 #coach-symbol{display:grid;place-items:center;min-width:24px;height:24px;padding:0 3px;border-radius:5px;font-size:16px;line-height:1;font-weight:700;color:white}

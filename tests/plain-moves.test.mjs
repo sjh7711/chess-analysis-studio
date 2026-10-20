@@ -8,11 +8,16 @@ import { describeMove, explainMistake, moveLabel } from '../src/insight.js';
 const game=parseGame(readFileSync(new URL('./fixtures/review-example.pgn',import.meta.url),'utf8'));
 const cp=(value,pv=[])=>({score:{type:'cp',value},bestmove:pv[0],lines:[{pv}],depth:16});
 
-test('Bxe6 identifies the black bishop and the actual captured white rook',()=>{
+test('Bxe6 keeps the exact capture action and explains removing the checking rook',()=>{
   const move=game.moves[47];
   assert.equal(move.san,'Bxe6');
   assert.equal(moveText(move),'흑 비숍이 e6의 백 룩을 잡습니다.');
-  assert.equal(describeMove(move,null,null).text,moveText(move));
+  const before=new Chess(move.before),after=new Chess(move.after);
+  assert.equal(before.isCheck(),true);
+  assert.deepEqual(before.get('e6'),{type:'r',color:'w'});
+  assert.equal(after.isCheck(),false);
+  assert.deepEqual(after.get('e6'),{type:'b',color:'b'});
+  assert.match(describeMove(move,null,null).text,/e6의 룩을 잡아 체크를 해소/);
   assert.equal(moveLabel(move),'흑의 24번째 수 · 비숍 c8에서 e6로');
 });
 

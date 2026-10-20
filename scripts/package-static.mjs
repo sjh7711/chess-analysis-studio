@@ -6,7 +6,7 @@ import { engineChunks } from '../src/engine-options.js';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const site = path.join(root, 'sites', 'chess-analysis');
 const dist = path.join(site, 'public');
-const modules = ['annotations', 'app', 'bootstrap', 'chess-core', 'completion-alerts', 'engine', 'engine-options', 'explanation-search', 'explanation-playback', 'game-review', 'human-recommendation', 'insight', 'move-sounds', 'notification-center', 'opening-book', 'online-nav', 'pieces', 'piece-themes', 'piece-settings', 'review', 'review-pool', 'sample', 'study', 'theme'];
+const modules = ['annotations', 'app', 'bootstrap', 'chess-core', 'coach-arrows', 'completion-alerts', 'engine', 'engine-options', 'explanation-search', 'explanation-playback', 'game-review', 'human-recommendation', 'insight', 'move-sounds', 'notification-center', 'opening-book', 'online-nav', 'pieces', 'piece-themes', 'piece-settings', 'positional-purpose', 'review', 'review-pool', 'sample', 'study', 'theme'];
 const files = [
   ['index.html', 'index.html'],
   ['styles.css', 'styles.css'],
@@ -41,11 +41,13 @@ for (const [source, target] of files) {
   await mkdir(path.dirname(destination), { recursive: true });
   await copyFile(path.join(root, source), destination);
 }
-const corePath = path.join(dist, 'src/chess-core.js');
-const core = await readFile(corePath, 'utf8');
 const dependency = '../node_modules/chess.js/dist/esm/chess.js';
-if (!core.includes(dependency)) throw new Error('Update the static chess.js import mapping.');
-await writeFile(corePath, core.replace(dependency, '../vendor/chess.js'));
+for (const name of ['chess-core','opening-book']) {
+  const target = path.join(dist, 'src', `${name}.js`);
+  const source = await readFile(target, 'utf8');
+  if (!source.includes(dependency)) throw new Error(`Update the static chess.js import mapping for ${name}.`);
+  await writeFile(target, source.replace(dependency, '../vendor/chess.js'));
+}
 for (const parallel of [false,true]) {
   const data = await readFile(path.join(root, `node_modules/stockfish/bin/stockfish-19${parallel ? '' : '-single'}.wasm`));
   const chunks = engineChunks(parallel);

@@ -119,7 +119,7 @@ test('a corrupt or mismatched alternative never invents a missed development opp
   const move=parseGame(SAMPLE_PGN).moves[11];
   const before={...cp(-25,['f8c5']),bestmove:'a8h8'};
   const description=describeMove(move,before,cp(88,['d3e4','d8h4']));
-  assert.match(description.text,/백 폰이 e4의 흑 폰을 잡을 수/);
+  assert.match(description.text,/백 폰이 d3에서 e4의 흑 폰을 잡을 수/);
   assert.doesNotMatch(description.text,/전개할 기회|대신|비숍|체크/);
 });
 
@@ -462,4 +462,196 @@ test('an already hanging piece is not described as newly exposed by an unrelated
   assert.match(description.text,/이미 공격받던 h4의 퀸을 지키지 않아/);
   assert.match(description.text,/흑 룩이 h4의 백 퀸을 잡을 수/);
   assert.doesNotMatch(description.text,/이 수로 인해.*수비 없이|새로.*공격/);
+});
+
+test('a capture alternative names the correct rook origin when both rooks can take the same queen',()=>{
+  const chess=new Chess('4k2q/6b1/8/8/8/8/1R5Q/4K2R b - - 0 20'),previousMove=chess.move('Qxh2');
+  const move=chess.move('h1h2'),pv=['g7b2','h2b2'];
+  for(const uci of pv)chess.move(uci);
+  const before=cp(0,['b2h2']),after=cp(-200,pv),context={previousMove};
+  const compact=describeMove(move,before,after,context),expanded=explainMove(move,before,after,context);
+  assert.equal(move.from,'h1');
+  assert.match(compact.text,/대신 백 룩이 b2에서 h2의 흑 퀸을 잡았어야/);
+  assert.match(expanded.alternativeFact,/백 룩이 b2에서 h2의 흑 퀸을 잡았어야/);
+  assert.doesNotMatch(expanded.alternativeFact,/h1에서 h2/);
+});
+
+test('an opponent capture names its origin when either rook could take the same knight',()=>{
+  const chess=new Chess('r2N3r/4k3/8/8/8/8/7P/5K2 w - - 0 30'),move=chess.move('Kf2');
+  const before=cp(0,['d8f7']),after=cp(-300,['a8d8']);
+  assert.ok(chess.moves({verbose:true}).some(reply=>reply.from==='h8' && reply.to==='d8'));
+  const compact=describeMove(move,before,after),expanded=explainMove(move,before,after);
+  assert.match(compact.text,/흑 룩이 a8에서 d8의 백 나이트를 잡을 수/);
+  assert.match(expanded.responseFact,/흑 룩이 a8에서 d8의 백 나이트를 잡을 수/);
+});
+
+test('capturing the target is not described as missing an alternative attack on that same target',()=>{
+  // Capablanca–Gonzalez, Havana 1941, before 55...Rxc1+.
+  const chess=new Chess('8/5kp1/8/2n1pP2/1pPpP3/pP1P4/2K3R1/2N4r b - - 4 55'),move=chess.move('Rxc1+');
+  const before=cp(-500,['c5d3']),after=cp(-250,['c2d2']);
+  assert.equal(move.captured,'n');
+  const alternative=new Chess(move.before);alternative.move('c5d3');
+  assert.ok(alternative.attackers('c1','b').includes('d3'));
+  const compact=describeMove(move,before,after),expanded=explainMove(move,before,after);
+  assert.doesNotMatch(compact.text,/c1의 나이트를 공격할 기회를 놓쳤습니다/);
+  assert.doesNotMatch(expanded.summary,/c1의 나이트를 공격할 기회를 놓쳤습니다/);
+  assert.match(expanded.alternativeFact,/흑 나이트가 d3의 백 폰을 잡았어야/);
+});
+
+test('a best primary queen trade is not called a bad move because its bound evaluation is slightly negative',()=>{
+  // Polgar–Community 2026, 19.Bxd4. The queen trade is the primary defence,
+  // not a separately refined acceptance example with a different evaluation.
+  const chess=new Chess('2k2r1r/pp2bQ1b/2n1p3/3pP2P/3n1N2/4B1N1/Pq3PBP/R4RK1 w - - 1 19');
+  const move=chess.move('Bxd4'),uci=uciMove(move),pv=['f8f7','d4b2','f7f4','a1d1'];
+  const before={...cp(-31,[uci,...pv]),configKey:'primary-trade-binding'};
+  const after={...cp(-400,pv),moveReview:{version:1,fen:move.before,uci,configKey:before.configKey,
+    beforeScore:before.score,beforeDepth:before.depth,beforeBestmove:before.bestmove,
+    score:before.score,depth:16,pv:[uci,...pv],source:'best'}};
+  const original=JSON.stringify({move,before,after}),insight=explainMove(move,before,after);
+  assert.equal(insight.grade.key,'best');
+  assert.equal(insight.response.score.value,-31,'use the bound review of this move, not the unrelated raw after score');
+  assert.match(insight.summary,/상대가 f7의 퀸을 룩으로 잡으면.*b2의 흑 퀸을 잡/);
+  assert.doesNotMatch(insight.summary,/좋은 수라고 볼 수는 없|불리하며|다만 이 응수 뒤의 평가/);
+  assert.equal(describeMove(move,before,after).text,insight.summary);
+  assert.equal(JSON.stringify({move,before,after}),original);
+});
+
+test('a pawn attack on a bishop takes priority over the secondary bishop path it opens',()=>{
+  // Polgar–Community 2026, 7.g4 chases Bf5; the opened f1 diagonal is secondary.
+  const chess=new Chess('r2qkbnr/pp2pppp/2n5/3pPb2/3P4/2N5/PP3PPP/R1BQKBNR w KQkq - 3 7');
+  const move=chess.move('g4');
+  assert.match(describeMove(move,null,null).text,/^f5의 비숍을 공격합니다/);
+  assert.doesNotMatch(describeMove(move,null,null).text,/나올 길/);
+});
+
+test('promotion and castling mates name the real checking piece on the completed board',()=>{
+  for(const {fen,san,piece,square,wrong} of [
+    {fen:'k7/2P5/1K6/8/8/8/8/8 w - - 0 30',san:'c8=Q#',piece:'퀸',square:'c8',wrong:/폰이 c8에서 체크메이트/},
+    {fen:'5k2/4N1pp/8/7B/7B/8/8/4K2R w K - 0 30',san:'O-O#',piece:'룩',square:'f1',wrong:/킹이 g1에서 체크메이트/},
+  ]) {
+    const chess=new Chess(fen),move=chess.move(san),caption=describeMove(move,null,null).text;
+    assert.equal(chess.isCheckmate(),true);
+    assert.match(caption,new RegExp(`${piece}이 ${square}에서 체크메이트`));
+    assert.doesNotMatch(caption,wrong);
+  }
+});
+
+test('a discovered mating PV identifies the rook, preserving the reviewed move and its evaluation',()=>{
+  const chess=new Chess('3rkr2/3p1p1p/8/8/8/8/4B3/K3R3 w - - 0 30'),move=chess.move('Kb1');
+  const before=cp(0,['e2f3']),after=cp(0,['h7h6','e2f3']);
+  const original=JSON.stringify({move,before,after}),insight=explainMove(move,before,after);
+  assert.equal(insight.response.moves[1].san,'Bf3#');
+  assert.equal(insight.grade.key,'miss','an earlier legal mate in one remains a missed chance even though this PV also mates');
+  assert.match(insight.summary,/룩이 e1에서 체크메이트/);
+  assert.match(insight.responseFact,/룩이 e1에서 체크메이트/);
+  assert.match(insight.response.focus.note,/룩이 e1에서 체크메이트/);
+  assert.doesNotMatch(insight.summary,/비숍이 f3에서 체크메이트/);
+  assert.equal(describeMove(move,before,after).text,insight.summary);
+  assert.equal(JSON.stringify({move,before,after}),original);
+});
+
+test('an opponent promotion mate is explained as the promoted queen checking rather than a pawn on the last rank',()=>{
+  const chess=new Chess('1k6/2P5/1K6/8/8/8/8/8 b - - 0 30'),move=chess.move('Ka8');
+  const score={type:'mate',value:1,winner:'w'},pv=['c7c8q'];
+  const before=cp(0,['b8c8']),after={score,depth:16,bestmove:pv[0],lines:[{pv,score,depth:16,multipv:1}]};
+  const insight=explainMove(move,before,after);
+  assert.match(insight.responseFact,/퀸으로 승격.*퀸이 c8에서 체크메이트할 수/);
+  assert.doesNotMatch(insight.summary,/폰이 c8에서 체크메이트/);
+  assert.equal(insight.response.moves[0].promotion,'q');
+});
+
+test('a missed immediate finish leads the explanation even when both evaluated branches still mate',()=>{
+  const chess=new Chess('7k/8/5KQ1/8/8/8/8/8 w - - 0 20'),move=chess.move('Qg4');
+  const score={type:'mate',value:1,winner:'w'},before={score,depth:16,bestmove:'g6g7',lines:[{pv:['g6g7']}]};
+  const after={score,depth:16,bestmove:'h8h7',lines:[{pv:['h8h7','g4g7']}]};
+  const original=JSON.stringify({move,before,after}),insight=explainMove(move,before,after);
+  assert.equal(insight.grade.key,'miss');
+  assert.equal(insight.grade.loss,0);
+  assert.equal(insight.grade.pointsLoss,0);
+  assert.match(insight.summary,/^한 수에 끝낼 수 있는 체크메이트 기회를 놓쳤습니다\./);
+  assert.match(insight.summary,/대신.*g7.*체크메이트했어야/);
+  assert.match(insight.responseFact,/퀸이 g7에서 체크메이트합니다/);
+  assert.equal(describeMove(move,before,after).text,insight.summary);
+  assert.equal(JSON.stringify({move,before,after}),original);
+});
+
+test('promotion exchanges include the original pawn promotion in the subsequent capture and recapture material notes',()=>{
+  // These are constructed positions, not the user's game record. A newly
+  // promoted queen is not an unrelated pre-existing nine-point queen loss.
+  for(const {fen,sans,gain} of [
+    {fen:'7k/5Pb1/8/8/8/8/8/5R1K w - - 0 30',sans:['f8=Q+','Bxf8','Rxf8+','Kh7'],gain:2},
+    {fen:'4R3/2P4k/8/2r5/8/8/8/7K w - - 0 30',sans:['c8=Q','Rxc8','Rxc8','Kh6'],gain:4},
+  ]) {
+    const chess=new Chess(fen),moves=sans.map(san=>chess.move(san));
+    const game={startFen:fen,moves,positions:[fen,...moves.map(move=>move.after)],headers:{}};
+    for(const index of [2,3]) {
+      const move=moves[index-1],before=cp(0,[uciMove(move)]),after=cp(0,moves.slice(index).map(uciMove));
+      const original=JSON.stringify({game,before,after}),context={game,index};
+      const insight=explainMove(move,before,after,context),line=createInsightLine({...context,before,after,insight},'response');
+      assert.match(insight.response.focus.note,new RegExp(index===2?`흑 ${gain}점 손해`:`백 ${gain}점 이득`));
+      assert.doesNotMatch(insight.response.focus.note,/흑 [68]점 이득|백 [46]점 손해/);
+      assert.equal(line.base.fen(),move.after);
+      assert.equal(line.cursor,0);
+      assert.equal(JSON.stringify({game,before,after}),original);
+    }
+  }
+});
+
+test('quiet pawn captions describe verified promotion progress and pawn-chain support after higher-priority tactics',()=>{
+  const advanced=new Chess('7k/8/8/2P5/8/8/8/K7 w - - 0 20').move('c6');
+  assert.match(describeMove(advanced,null,null).text,/통과 폰.*c6.*승격까지 두 칸/);
+  const chain=new Chess('7k/8/8/8/2P1P3/8/3P4/K7 w - - 0 20').move('d3');
+  assert.match(describeMove(chain,null,null).text,/c4·e4의 폰.*폰 사슬/);
+  const attack=new Chess('r2qkbnr/pp2pppp/2n5/3pPb2/3P4/2N5/PP3PPP/R1BQKBNR w KQkq - 3 7').move('g4');
+  assert.match(describeMove(attack,null,null).text,/^f5의 비숍을 공격/);
+});
+
+function quietAttackFixture({castle=false,pv}={}) {
+  const chess=new Chess(castle?'r3k3/8/8/7b/8/5P2/6PP/3K4 w q - 0 20'
+    :'4k3/8/8/7b/8/5P2/6P1/6K1 w - - 0 20');
+  const move=chess.move(castle?'h3':'Kf2');
+  const line=pv||(castle?['g2g4','e8c8','d1e1','h5g4','f3g4','c8d7']:['g2g4','h5g4','f3g4','e8e7']);
+  const before=cp(200,line),after=cp(-150,[castle?'e8d7':'h5g6']);
+  const game={startFen:move.before,moves:[move],positions:[move.before,move.after],headers:{}};
+  return {move,before,after,game,index:1};
+}
+
+test('a quiet bishop attack connects its verified capture example and settled gain to the alternative purpose',()=>{
+  for(const castle of [false,true]) {
+    const context=quietAttackFixture({castle}),{move,before,after}=context,original=JSON.stringify(context);
+    const insight=explainMove(move,before,after),line=createInsightLine({...context,insight},'alternative');
+    assert.equal(insight.alternative.focus.length,castle?5:3);
+    assert.deepEqual(line.steps.map(step=>step.san),castle?['g4','O-O-O+','Ke1','Bxg4','fxg4']:['g4','Bxg4','fxg4']);
+    assert.match(insight.alternativeFact,/h5의 비숍을 공격/);
+    assert.match(insight.alternativeFact,/예상 응수.*상대가 g4의 폰을 비숍으로 잡으면.*폰으로 그 비숍을 되잡/);
+    assert.match(insight.alternativeFact,/교환 후 백이 기물 점수 2점의 이득.*예시/);
+    assert.match(insight.alternative.focus.note,/백 2점 이득/);
+    assert.doesNotMatch(insight.alternativeFact,/강제로|반드시|수밖에|무조건/);
+    assert.equal(describeMove(move,before,after).text,insight.summary);
+    assert.equal(line.base.fen(),move.before);
+    assert.equal(line.cursor,0);
+    assert.equal(JSON.stringify(context),original);
+  }
+});
+
+test('declined, late, incomplete or illegal quiet-attack continuations never assert the short capture payoff',()=>{
+  for(const pv of [
+    ['g2g4','h5g6','g1f2','e8e7'],
+    ['g2g4','h5g4'],
+    ['g2g4','h5g4','f3g4','e8e6'],
+    ['g2g4','h5g6','g1f2','g6h5','f2e3','e8e7','e3d3','h5g4','f3g4'],
+  ]) {
+    const {move,before,after}=quietAttackFixture({pv}),insight=explainMove(move,before,after);
+    assert.equal(insight.alternative.focus.length,1);
+    assert.doesNotMatch(insight.alternativeFact,/비숍으로 잡으면|점의 이득|되잡아 교환/);
+    assert.equal(insight.alternative.focus.purposePayoff,undefined);
+  }
+});
+
+test('a passed pawn escape keeps its immediate defensive purpose and adds the verified promotion distance',()=>{
+  const chess=new Chess('7k/8/8/2P4r/8/8/8/K7 w - - 0 20'),move=chess.move('c6');
+  const caption=describeMove(move,null,null).text;
+  assert.match(caption,/^공격받던 폰을 c6로 피합니다\./);
+  assert.match(caption,/통과 폰.*c6.*승격까지 두 칸/);
+  assert.doesNotMatch(caption,/반드시|승격합니다|승리/);
 });

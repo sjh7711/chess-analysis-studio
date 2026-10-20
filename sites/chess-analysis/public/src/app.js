@@ -1,4 +1,4 @@
-import { Chess, parseGame, gameAt, positionCommand, classifyMove, hasMoveReview, assessedMoveResult, MOVE_GRADES, GRADING_BASIS, formatScore, scoreValue, pvToSan, exportPgn } from './chess-core.js';
+import { Chess, parseGame, gameAt, classifyMove, hasMoveReview, assessedMoveResult, MOVE_GRADES, GRADING_BASIS, formatScore, scoreValue, exportPgn } from './chess-core.js';
 import { StockfishEngine } from './engine.js';
 import { reviewMove } from './review.js';
 import { ENGINES, DEFAULT_ENGINE_ID, REVIEW_ENGINE_ID, AUTO_THREAD_LABEL, availableReviewWorkers, automaticThreads, engineId, normalizePerformance, searchOptions, reviewOptions, gameReviewOptions, analysisKey } from './engine-options.js';
@@ -7,8 +7,9 @@ import { pieceSvg, pieceSnapshot, pieceTransitions, StepNavigation, capturedPiec
 import { BoardAnnotations } from './annotations.js';
 import { SAMPLE_PGN } from './sample.js';
 import { AnalysisLine, PlaybackClock, PIECE_NAMES, cloneChess, editedPosition, materialBalance, exportLine, restoreResults, moveText } from './study.js';
-import { createInsightLine, describeMove, describeHumanMove, explainMove, refineInsight, moveLabel, moveTurn } from './insight.js';
+import { createInsightLine, describeMove, explainMove, refineInsight, moveLabel, moveTurn } from './insight.js';
 import { humanRecommendation } from './human-recommendation.js';
+import { explanationArrows } from './coach-arrows.js';
 import { ExplanationSearch, explanationOptions } from './explanation-search.js';
 import { mergeExplanationLine } from './explanation-playback.js';
 import { completionAlerts } from './notification-center.js';
@@ -19,9 +20,9 @@ const moveSounds=new MoveSounds({button:$('move-sound')});
 const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
 const STORAGE = 'chessreview.v1';
 const LIBRARY = 'chessreview.library.v1';
-let removedGame = null, exportFilename = 'chess-review.pgn', insightContext = null, insightMarkup = '', recommendationMarkup = '';
+let removedGame = null, exportFilename = 'chess-review.pgn', insightContext = null, insightMarkup = '';
 let coachCache=null, coachExpanded=null;
-let humanChoiceCache=null, recommendationShown=null;
+let humanChoiceCache=null;
 const explanationSearch=new ExplanationSearch();
 let moveListScroll=0, restoreMoveListScroll=false;
 let renderedBoard=null, renderedFlipped=false, editorPieceId=0;
@@ -305,11 +306,38 @@ function renderBoard() {
 
 function renderArrow() {
   const arrow = $('best-arrow');
+  const teaching = $('coach-arrows');
+  teaching.replaceChildren();
+  arrow.setAttribute('visibility','hidden');
+  if (state.editor || !$('show-arrow').checked) return;
+  const xy = square => { let col = square.charCodeAt(0)-97, row = 8-Number(square[1]); if (state.flipped) { col=7-col; row=7-row; } return [col*100+50,row*100+50]; };
+  const played = state.game.moves[state.index-1];
+  const grade = coachCache?.comment.grade;
+  const targets = !state.line && played && coachCache?.move===played && grade && grade.severity<1
+    && !currentChess().isGameOver() ? explanationArrows(played,$('coach-text').textContent) : [];
+  if (targets.length===2 && (!state.selected || targets.every(target=>target.from===state.selected))) {
+    for (const target of targets) {
+      const start=xy(target.from), end=xy(target.to), points=[start];
+      const dx=end[0]-start[0],dy=end[1]-start[1];
+      if (currentChess().get(target.from)?.type==='n' && Math.abs(dx*dy)===20000)
+        points.push(Math.abs(dx)>Math.abs(dy)?[end[0],start[1]]:[start[0],end[1]]);
+      const previous=points.at(-1),length=Math.hypot(end[0]-previous[0],end[1]-previous[1]);
+      points.push([end[0]-(end[0]-previous[0])*17/length,end[1]-(end[1]-previous[1])*17/length]);
+      const path=document.createElementNS('http://www.w3.org/2000/svg','path');
+      path.setAttribute('d',points.map(([x,y],i)=>`${i?'L':'M'}${x} ${y}`).join(' '));
+      path.setAttribute('fill','none');path.setAttribute('stroke','#e6a43c');
+      path.setAttribute('stroke-width','15');path.setAttribute('stroke-linejoin','round');
+      path.setAttribute('stroke-linecap','round');path.setAttribute('opacity','.86');
+      path.setAttribute('marker-end','url(#arrowhead)');
+      path.dataset.from=target.from;path.dataset.to=target.to;path.dataset.kind=target.kind;
+      teaching.append(path);
+    }
+    return;
+  }
   const move = currentHumanChoice()?.line.pv[0] || shownResult()?.bestmove;
   const nextStep = state.line?.steps[state.line.cursor];
   const arrowMove = state.line?.kind === 'pv' ? nextStep?.uci : move;
-  if (state.editor || !$('show-arrow').checked || !arrowMove || !/^[a-h][1-8][a-h][1-8]/.test(arrowMove) || (state.selected && state.selected !== arrowMove.slice(0,2))) { arrow.setAttribute('visibility','hidden'); return; }
-  const xy = square => { let col = square.charCodeAt(0)-97, row = 8-Number(square[1]); if (state.flipped) { col=7-col; row=7-row; } return [col*100+50,row*100+50]; };
+  if (!arrowMove || !/^[a-h][1-8][a-h][1-8]/.test(arrowMove) || (state.selected && state.selected !== arrowMove.slice(0,2))) return;
   const [x1,y1] = xy(arrowMove.slice(0,2)), [x2,y2] = xy(arrowMove.slice(2,4));
   const length = Math.hypot(x2-x1,y2-y1);
   arrow.setAttribute('x1',x1); arrow.setAttribute('y1',y1);
@@ -322,9 +350,7 @@ function currentHumanChoice() {
   const result=shownResult(),cursor=state.line?.cursor??state.index;
   if(humanChoiceCache?.game===state.game && humanChoiceCache.line===state.line
     && humanChoiceCache.cursor===cursor && humanChoiceCache.result===result)return humanChoiceCache.choice;
-  const chess=currentChess(),selection=humanRecommendation(chess,result);
-  const choice=selection && {...selection,description:describeHumanMove(selection.move,
-    {previousMove:chess.history({verbose:true}).at(-1)})||selection.reason};
+  const choice=humanRecommendation(currentChess(),result);
   humanChoiceCache={game:state.game,line:state.line,cursor,result,choice};
   return choice;
 }
@@ -390,7 +416,6 @@ function renderAnalysis() {
   renderCoach();
   $('arrow-label').textContent=state.line?.kind==='pv'?'다음 재생 수 표시':'추천 수 표시';
   $('show-arrow').setAttribute('aria-label',$('arrow-label').textContent);
-  $('evaluation-basis').textContent = `평가 · ${evaluationSide()} 기준${state.line?.conditional?' · 희생 수락 예시':''}${busy?' · 분석 중':''}`;
   $('rail-score').textContent = displayScore(result?.score);
   const rail = $('eval-fill').parentElement;
   rail.classList.toggle('flipped',state.flipped);
@@ -418,51 +443,7 @@ function renderAnalysis() {
   $('progress-bar').max = totalTasks;
   $('progress-bar').value = doneTasks;
   $('analysis-progress').title='국면 분석과 수 검토의 완료 작업 수입니다. 작업별 소요 시간은 다를 수 있습니다.';
-  $('pv-lines').style.setProperty('--pv-columns',Math.min(performanceOptions.multipv,3));
-  const choice=currentHumanChoice();
-  $('human-recommendation').hidden=!choice;
-  if(choice) {
-    $('human-move').textContent=`${choice.move.san} · `;
-    $('human-reason').textContent=choice.description;
-    $('human-basis').textContent=choice.isEngineBest?'엔진 최선도 같은 수입니다.'
-      :`엔진 최선과 평가 차이 ${(choice.lossCp/100).toFixed(2)} · 목적이 분명한 후보를 먼저 보여줍니다.`;
-  }
-  if (result?.lines?.length) {
-    const chess=currentChess(),fen=chess.fen();
-    const rows=result.lines.map((line,index)=>({line,index}));
-    if(choice)rows.sort((a,b)=>Number(b.line===choice.line)-Number(a.line===choice.line));
-    recommendationShown={game:state.game,line:state.line,cursor:state.line?.cursor??state.index,
-      history:positionCommand(chess),result,rows:new Map(rows.map(item=>[item.index,item.line]))};
-    const markup = rows.map(({line,index:i}) => {
-      const position = new Chess(fen);
-      const number = position.moveNumber();
-      let move, reply;
-      const play = uci => position.move({ from:uci.slice(0,2), to:uci.slice(2,4), promotion:uci[4] });
-      try { move = play(line.pv[0]); } catch { return ''; }
-      try { if (line.pv[1]) reply = play(line.pv[1]); } catch { /* A partial PV can still show its legal first move. */ }
-      const notation = `${number}${move.color === 'w' ? '.' : '...'} ${move.san}`;
-      const replyText = reply ? `${reply.color === 'w' ? '백' : '흑'} 응수 ${reply.san}` : notation;
-      const moveLabel = `${PIECE_NAMES[move.piece]} ${move.from} ${move.captured ? '×' : '→'} ${move.to}${move.promotion ? ` · ${PIECE_NAMES[move.promotion]} 승격` : ''}`;
-      const score = displayScore(line.score);
-      const squares = `${move.from} ${move.captured ? '×' : '→'} ${move.to}${move.promotion ? `=${move.promotion.toUpperCase()}` : ''}`;
-      const recommended=line===choice?.line,label=recommended?'추천':`엔진 ${i+1}`;
-      const accessibleLabel=recommended?`이해하기 쉬운 추천 · 엔진 ${i+1}순위`:`엔진 ${i+1}순위`;
-      return `<button class="pv-row${recommended || !choice && i===0 ? ' pv-best' : ''}${recommended?' pv-human':''}" data-pv="${i}" aria-label="${escape(`${accessibleLabel} ${move.color === 'w' ? '백' : '흑'} ${moveLabel}, ${evaluationSide()} 기준 평가 ${score}, 전체 예상 수순 탐색`)}" title="${escape(`${recommended?'이해하기 쉬운 추천 · ':''}엔진 ${i+1}순위 · ${moveLabel} · ${pvToSan(fen,line.pv)}`)} · 깊이 ${line.depth}"><span class="pv-number">${label}</span><span class="pv-score">${score}</span><span class="pv-move"><span class="pv-piece">${pieceSvg(move.piece,move.color)}</span><strong>${escape(squares)}</strong></span><span class="pv-reply">${escape(replyText)}</span><span class="pv-play">전체 수순 보기</span></button>`;
-    }).join('');
-    setRecommendationContent(markup);
-  } else {
-    recommendationShown=null;
-    const markup=`<p class="empty-text">${escape(result?.terminal || (state.line?.explanationSnapshot ? '이 장면의 추천 수는 현재 국면 재분석으로 확인하세요.' : state.mode === 'full' ? '이 국면의 분석 차례를 기다리고 있습니다.' : state.error || '분석 중 · 완료 후 추천 수를 표시합니다.'))}</p>`;
-    setRecommendationContent(markup);
-  }
-  $('pv-lines').setAttribute('aria-busy',String(busy));
   renderArrow();
-}
-
-function setRecommendationContent(markup) {
-  if (recommendationMarkup===markup) return;
-  recommendationMarkup=markup;
-  $('pv-lines').innerHTML=markup;
 }
 
 function renderMoves(scroll = false) {
@@ -763,27 +744,6 @@ function startExploration() {
   renderAll(); scheduleAnalysis();
 }
 
-function startPv(index) {
-  const shown=recommendationShown,chess=currentChess();
-  if(!shown || shown.game!==state.game || shown.line!==state.line || shown.cursor!==(state.line?.cursor??state.index)
-    || shown.history!==positionCommand(chess))return;
-  // Use exactly the displayed candidate even if a background result arrived
-  // before the next paint. The displayed index is the original engine index.
-  const recommendation = shown.rows.get(index);
-  if (!recommendation) return;
-  const line = new AnalysisLine(chess,recommendation.pv,shown.result);
-  if (!line.steps.length) { toast('재생 가능한 추천 수순이 없습니다.',true); return; }
-  line.seek(1);
-  line.kind = 'pv';
-  line.title = '선택한 추천 수 · 전체 예상 수순';
-  line.sourceScore = recommendation.score;
-  line.sourceDepth = recommendation.depth;
-  pausePlayback(); stopJob();
-  state.line = line; state.selected = null; state.tab = 'study';
-  state.chartMode = 'line';
-  renderAll(); scheduleAnalysis();
-}
-
 function seekLine(index, keepPlaying = false,{analyze=true}={}) {
   if (!state.line || state.editor) return;
   const previous=state.line.cursor;
@@ -1024,7 +984,6 @@ $('board').addEventListener('click', event => { if(Date.now()<suppressClickUntil
 $('move-list').addEventListener('click', event => { const button = event.target.closest('[data-index]'); if (button) navigate(Number(button.dataset.index)); });
 $('move-list').addEventListener('scroll',rememberMoveListScroll,{passive:true});
 $('review-content').addEventListener('click', event => { const button = event.target.closest('[data-review-index]'); if (button) navigate(Number(button.dataset.reviewIndex)); });
-$('pv-lines').addEventListener('click', event => { const button = event.target.closest('[data-pv]'); if (button) startPv(Number(button.dataset.pv)); });
 $('insight-content').addEventListener('click',event=>{const button=event.target.closest('[data-insight-play]');if(button)startInsight(button.dataset.insightPlay,button.dataset.insightScope);});
 $('coach-explain').onclick=openCoachExplanation;
 $('coach-prev').onclick=()=>{if(state.line)seekLine(state.line.cursor-1);};
@@ -1291,7 +1250,7 @@ function sizeNotation() {
     const mobile = matchMedia('(max-width:700px)').matches;
     const top = Math.max(16,notationColumn.getBoundingClientRect().top);
     const fixedHeight = [...notationColumn.firstElementChild.children].filter(element=>!['moves-content','study-panel','review-content'].includes(element.id)).reduce((height,element)=>height+element.offsetHeight,0);
-    let panelHeight = state.tab === 'review' ? 540 : 240;
+    let panelHeight = state.tab === 'review' ? 540 : 287;
     if (state.tab === 'study') {
       const panel = $('study-panel'), style = getComputedStyle(panel);
       const controlsHeight = [...panel.children].filter(element=>element.id !== 'study-steps' && !element.hidden).reduce((height,element)=>{

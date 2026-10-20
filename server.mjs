@@ -17,7 +17,7 @@ const files = new Map([
   ['/src/move-sounds.js', 'src/move-sounds.js'],
   ['/sounds/chess-move.wav', 'sounds/chess-move.wav'],
   ['/sounds/chess-capture.wav', 'sounds/chess-capture.wav'],
-  ...['annotations', 'app', 'bootstrap', 'chess-core', 'completion-alerts', 'engine', 'engine-options', 'explanation-search', 'explanation-playback', 'insight', 'notification-center', 'opening-book', 'online-nav', 'pieces', 'piece-themes', 'piece-settings', 'review', 'sample', 'study'].map(name => [`/src/${name}.js`, `src/${name}.js`]),
+  ...['annotations', 'app', 'bootstrap', 'chess-core', 'coach-arrows', 'completion-alerts', 'engine', 'engine-options', 'explanation-search', 'explanation-playback', 'game-review', 'human-recommendation', 'insight', 'notification-center', 'opening-book', 'online-nav', 'pieces', 'piece-themes', 'piece-settings', 'positional-purpose', 'review', 'review-pool', 'sample', 'study'].map(name => [`/src/${name}.js`, `src/${name}.js`]),
   ['/isolation-worker.js', 'isolation-worker.js'],
   ['/node_modules/chess.js/dist/esm/chess.js', 'node_modules/chess.js/dist/esm/chess.js'],
   ['/engine/stockfish-19-lite-single.js', 'node_modules/stockfish/bin/stockfish-19-lite-single.js'],

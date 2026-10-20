@@ -131,7 +131,7 @@ test('a white mistake also starts the opponent response after the mistake and th
   assert.equal(alternative.reviewKind,'alternative');
 });
 
-test('a deeper response that restores a verified mate replaces the old missed-mate caption without regrading the game',()=>{
+test('a deeper response updates its actual mate while preserving the earlier missed immediate finish and the original grade',()=>{
   const chess=new Chess('7k/8/5KQ1/8/8/8/8/8 w - - 0 1'),move=chess.move('Qg4');
   const game={startFen:move.before,moves:[move],positions:[move.before,move.after],headers:{}},index=1;
   const before=mate(1,'w',['g6g7']),after=cp(0,['h8h7']),context={game,index,before,after};
@@ -143,9 +143,9 @@ test('a deeper response that restores a verified mate replaces the old missed-ma
     explanationIdentity:insightIdentity(context,'response'),searchGoal:{depth:18,movetime:1000,multipv:1,restrictedMoves:[]}};
   const refined=refineInsight({...context,insight},'response',result);
   assert.ok(refined);
-  assert.match(refined.summary,/g7에서 체크메이트합니다/);
+  assert.match(refined.summary,/한 수에 끝낼 수 있는 체크메이트 기회를 놓쳤습니다/);
+  assert.match(refined.summary,/g7.*체크메이트했어야/);
   assert.match(refined.responseFact,/g7에서 체크메이트합니다/);
-  assert.doesNotMatch(refined.summary,/체크메이트 기회를 놓쳤습니다/);
   assert.equal(refined.grade,insight.grade);
   assert.equal(refined.evaluation,insight.evaluation);
   assert.equal(JSON.stringify(context),original);

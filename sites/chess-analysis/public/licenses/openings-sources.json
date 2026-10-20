@@ -3,6 +3,7 @@
   "license": "CC0-1.0",
   "downloaded": "2026-10-04",
   "maxPlies": 36,
+  "recognition": "Named edges or legally verified arrivals at registered positions; board, turn, castling and en-passant rights are preserved.",
   "sources": [
     {
       "file": "a.tsv",
