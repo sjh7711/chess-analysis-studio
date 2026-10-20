@@ -94,8 +94,8 @@
       <p class="engine-setting-note">엔진 파일은 선택한 뒤 내려받습니다.</p>
       <div class="engine-setting"><label for="settings-depth">분석 깊이</label><select id="settings-depth"><option value="12">12 · 빠르게</option><option value="16">16 · 균형</option><option value="20">20 · 자세히</option><option value="24">24 · 깊게</option></select></div>
       <div class="engine-setting"><label for="settings-time">국면당 최대 시간</label><select id="settings-time"><option value="0">깊이에 맞게 · 0.6~5초</option><option value="500">0.5초</option><option value="1000">1초</option><option value="3000">3초</option><option value="5000">5초</option><option value="10000">10초</option><option value="30000">30초</option></select></div>
-      <div class="engine-setting"><label for="settings-review">전체 대국 검토</label><select id="settings-review"><option value="fast">빠른 검토 · 권장</option><option value="precise">정밀 검토</option></select></div>
-      <p class="engine-setting-note">빠른 검토는 후보 수를 최대 2개, 시간을 절반(최대 1.5초)으로 줄입니다. 선택한 국면은 아래 라인 수와 원래 시간으로 다시 분석합니다. 분류가 달라질 수 있으며, 더 자세한 비교는 정밀 검토를 선택하세요.</p>
+      <div class="engine-setting"><label for="settings-review">전체 대국 검토</label><select id="settings-review"><option value="precise">정밀 검토 · 권장</option><option value="fast">빠른 검토</option></select></div>
+      <p class="engine-setting-note">정밀 검토는 모든 국면에 선택한 시간과 후보 수를 동일하게 적용하고, 최선의 수와 실전 수를 같은 출발 국면에서 비교합니다. 빠른 검토는 최대 2후보·절반 시간(최대 1.5초)으로 계산하며, 국면 재분석 시 분류가 달라질 수 있습니다. 계산 중에는 기물·추천 화살표를 고정하고 완료된 결과만 표시합니다.</p>
       <div class="engine-setting"><label for="settings-lines">라인 수</label><select id="settings-lines"><option value="1">1개</option><option value="2">2개</option><option value="3">3개</option><option value="5">5개</option></select></div>
       <div class="engine-setting"><label for="settings-threads">스레드</label><select id="settings-threads" aria-describedby="threads-note"><option value="1">1개</option><option value="2">2개</option><option value="4">4개</option><option value="8">8개</option></select></div>
       <p id="threads-note" class="engine-setting-note"></p>

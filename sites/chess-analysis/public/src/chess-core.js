@@ -125,7 +125,7 @@ export const MOVE_GRADES = Object.freeze({
   inaccuracy:{label:'부정확',symbol:'?!'}, mistake:{label:'실수',symbol:'?'},
   miss:{label:'놓친 기회',symbol:'×'}, blunder:{label:'블런더',symbol:'??'},
 });
-export const GRADING_BASIS = '예상 승점 감소: 우수한 수 2%p 미만, 좋은 수 5%p 미만, 부정확 5~10%p, 실수 10~20%p, 블런더 20%p 이상. 새 강제 메이트 허용은 블런더, 강제 메이트 기회를 놓치면 놓친 기회로 분류합니다. 엔진 점수를 자체 모델로 환산한 참고 분류이며 Chess.com의 레이팅별 계산과는 다릅니다.';
+export const GRADING_BASIS = 'Chess.com 공개 예상 승점 감소 구간: 우수한 수 0~2%p, 좋은 수 2~5%p, 부정확 5~10%p, 실수 10~20%p, 블런더 20%p 이상. 최선의 수는 엔진의 1순위 수입니다. 이 앱은 경계값부터 다음 등급을 적용하며, 예상 승점 환산과 특수 분류는 자체 추정입니다. Chess.com의 레이팅별 환산식과 CAPS2 정확도 계산식은 공개되지 않아 동일한 결과를 보장하지 않습니다.';
 
 // Transparent approximation, not a claim to reproduce Chess.com's undisclosed rating model.
 export function expectedPoints(score, color = 'w') {
@@ -135,6 +135,25 @@ export function expectedPoints(score, color = 'w') {
 }
 
 const gradeCache = new WeakMap();
+const sameScore=(a,b)=>a?.type===b?.type && a?.value===b?.value && a?.winner===b?.winner;
+export function hasMoveReview(before, after, move) {
+  const review=after?.moveReview;
+  return !!(before && move && review?.version===1 && review.fen===move.before && review.uci===uciMove(move)
+    && review.configKey===before.configKey && review.beforeDepth===before.depth && review.beforeBestmove===before.bestmove
+    && sameScore(review.beforeScore,before.score) && ['cp','mate'].includes(review.score?.type) && Number.isFinite(review.score.value)
+    && review.pv?.[0]===review.uci);
+}
+
+// A root-restricted search includes the played move. Convert its PV and mate
+// distance to the resulting position before building explanations/replays.
+export function assessedMoveResult(before, after, move) {
+  if (!hasMoveReview(before,after,move)) return after;
+  const review=after.moveReview;
+  let score=review.score;
+  if (score.type==='mate' && score.winner===move.color) score={...score,value:Math.sign(scoreValue(score))*Math.max(0,Math.abs(score.value)-1)};
+  const pv=review.pv.slice(1);
+  return {...after,score,depth:review.depth,bestmove:pv[0]||null,lines:pv.length?[{multipv:1,score,depth:review.depth,pv}]:[]};
+}
 const values = {p:1,n:3,b:3,r:5,q:9,k:0};
 function material(chess, color) {
   return chess.board().flat().reduce((sum,p)=>sum+(p ? values[p.type]*(p.color===color ? 1 : -1) : 0),0);
@@ -163,27 +182,24 @@ export function classifyMove(before, after, move, {previous} = {}) {
   if (!before || !after || !move) return null;
   const cached = gradeCache.get(move);
   if (cached?.before===before && cached.after===after && cached.previous===previous) return cached.grade;
+  const assessed=assessedMoveResult(before,after,move);
   const sign = move.color === 'w' ? 1 : -1;
   let loss;
-  if (before.score.type === 'mate' && after.score.type === 'mate' && Math.sign(scoreValue(before.score)) === Math.sign(scoreValue(after.score))) loss = 0;
-  else loss = Math.max(0, (scoreValue(before.score) - scoreValue(after.score)) * sign);
+  if (before.score.type === 'mate' && assessed.score.type === 'mate' && Math.sign(scoreValue(before.score)) === Math.sign(scoreValue(assessed.score))) loss = 0;
+  else loss = Math.max(0, (scoreValue(before.score) - scoreValue(assessed.score)) * sign);
   const best = before.bestmove === uciMove(move);
   if (best) loss=0;
-  const beforePoints=expectedPoints(before.score,move.color), afterPoints=expectedPoints(after.score,move.color);
+  const beforePoints=expectedPoints(before.score,move.color), afterPoints=expectedPoints(assessed.score,move.color);
   const pointsLoss=best ? 0 : Math.max(0,beforePoints-afterPoints);
-  let key=best || pointsLoss===0 ? 'best' : pointsLoss<0.02 ? 'excellent' : pointsLoss<0.05 ? 'good' : pointsLoss<0.10 ? 'inaccuracy' : pointsLoss<0.20 ? 'mistake' : 'blunder';
+  let key=best ? 'best' : pointsLoss<0.02 ? 'excellent' : pointsLoss<0.05 ? 'good' : pointsLoss<0.10 ? 'inaccuracy' : pointsLoss<0.20 ? 'mistake' : 'blunder';
   let severity=pointsLoss>=0.20 ? 3 : pointsLoss>=0.10 ? 2 : pointsLoss>=0.05 ? 1 : 0;
   let reason='';
-  const second=before.lines?.find(line=>line.multipv===2 && line.score);
-  if (!best && after.score.type==='mate' && afterPoints===0 && !(before.score.type==='mate' && beforePoints===0)) {
-    key='blunder'; severity=3; reason='상대에게 강제 체크메이트를 허용했습니다.';
-  } else if (!best && before.score.type==='mate' && beforePoints===1 && !(after.score.type==='mate' && afterPoints===1)) {
-    key='miss'; severity=2; reason='강제 체크메이트 기회를 놓쳤습니다.';
-  } else if (pointsLoss<0.02 && afterPoints>=0.45 && beforePoints<0.90 && verifiedSacrifice(move,after)) {
+  const second=before.lines?.find(line=>line.multipv===2 && line.score && line.depth===before.depth);
+  if (pointsLoss<0.02 && afterPoints>=0.45 && beforePoints<0.90 && verifiedSacrifice(move,assessed)) {
     key='brilliant'; reason='예상 응수에서 기물을 희생하면서도 국면을 유지하는 수입니다.';
   } else if (best && second && afterPoints>=0.45 && beforePoints-expectedPoints(second.score,move.color)>=0.10) {
     key='great'; reason='다른 후보보다 예상 승점을 크게 지키는 결정적인 수입니다.';
-  } else if (previous && beforePoints>=0.75 && afterPoints<=0.55 && beforePoints-expectedPoints(previous.score,move.color)>=0.10) {
+  } else if (!best && previous && beforePoints>=0.75 && afterPoints<=0.55 && beforePoints-expectedPoints(previous.score,move.color)>=0.10) {
     key='miss'; severity=Math.max(2,severity); reason='상대 실수로 생긴 승리 기회를 살리지 못했습니다.';
   } else if (pointsLoss<0.05 && isBookMove(move)) {
     key='book'; reason='등록된 오프닝 수순에 있는 이론 수입니다.';

@@ -10,7 +10,7 @@ const mate = (value,winner,pv) => result({type:'mate',value,winner},pv);
 
 test('explains mate in one from the supplied game and offers a legal alternative',()=>{
   const move=parseGame(SAMPLE_PGN).moves[44]; // 23. Qxh5?? Qe1#
-  const explanation=explainMistake(move,cp(-823,['d1g1']),mate(-1,'b',['f2e1']));
+  const explanation=explainMistake(move,cp(0,['d1g1']),mate(-1,'b',['f2e1']));
   assert.equal(explanation.grade.key,'blunder');
   assert.match(explanation.summary,/흑 퀸이 f2에서 e1로 이동해 상대 왕을 체크메이트할 수 있습니다/);
   assert.match(explanation.summary,/대신 백 퀸이 d1에서 g1로 이동했어야 합니다/);
@@ -65,7 +65,7 @@ test('missing, illegal and mismatched PVs cannot invent a continuation',()=>{
 test('losing a forced mate is distinct from being mated',()=>{
   const chess=new Chess('7k/8/5KQ1/8/8/8/8/8 w - - 0 1');
   const move=chess.move('g6g4');
-  const explanation=explainMistake(move,mate(1,'w',['g6g7']),cp(900,['h8h7']));
+  const explanation=explainMistake(move,mate(1,'w',['g6g7']),cp(0,['h8h7']));
   assert.match(explanation.reason,/가능했던 강제 체크메이트 수순을 놓쳤습니다/);
   assert.doesNotMatch(explanation.reason,/허용/);
   assert.equal(explanation.lossText,'메이트 평가 변화');
@@ -116,7 +116,7 @@ test('switching Rd8 response and alternative replays preserves their different s
 
 test('a white mistake also starts the opponent response after the mistake and the alternative before it',()=>{
   const game=parseGame(SAMPLE_PGN), index=45, move=game.moves[index-1];
-  const before=cp(-823,['d1g1']), after=mate(-1,'b',['f2e1']);
+  const before=cp(0,['d1g1']), after=mate(-1,'b',['f2e1']);
   const context={game,index,before,after,insight:explainMistake(move,before,after)};
   const response=createInsightLine(context,'response'), alternative=createInsightLine(context,'alternative');
   assert.equal(response.base.get('h5').type,'q');

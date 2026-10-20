@@ -77,10 +77,10 @@ test('grades distinguish white and black losses and preserve winning mates', () 
   const result = value => ({score:{type:'cp',value},bestmove:'a2a3'});
   const move = {from:'e2',to:'e4',color:'w'};
   assert.equal(classifyMove(result(100),result(-150),move).key,'blunder');
-  assert.equal(classifyMove(result(100),result(-150),{...move,color:'b'}).key,'best');
+  assert.equal(classifyMove(result(100),result(-150),{...move,color:'b'}).key,'excellent');
   assert.equal(classifyMove(result(-100),result(10),{...move,color:'b'}).key,'mistake');
   assert.equal(classifyMove({...result(100),bestmove:'e2e4'},result(100),move).key,'best');
-  assert.equal(classifyMove({score:{type:'mate',value:3,winner:'w'}},{score:{type:'mate',value:5,winner:'w'}},move).key,'best');
+  assert.equal(classifyMove({score:{type:'mate',value:3,winner:'w'}},{score:{type:'mate',value:5,winner:'w'}},move).key,'excellent');
 });
 test('promotion PV uses SAN, illegal continuation is truncated', () => {
   assert.match(pvToSan('7k/P7/7K/8/8/8/8/8 w - - 0 1',['a7a8q','a1a2']),/^1\. a8=Q/);

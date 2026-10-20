@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { analysisKey, engineChunks, normalizePerformance, searchOptions, supportedThreads, workerUrl } from '../src/engine-options.js';
+import { analysisKey, DEFAULT_PERFORMANCE, engineChunks, normalizePerformance, searchOptions, supportedThreads, workerUrl } from '../src/engine-options.js';
 import { StockfishEngine } from '../src/engine.js';
 import { restoreResults } from '../src/study.js';
 
@@ -15,6 +15,10 @@ test('performance controls map to search limits and distinguish cached evaluatio
   assert.equal(normalizePerformance({threads:8},2).threads,1);
   assert.equal(supportedThreads(false,16),1);
   assert.equal(supportedThreads(true,6),4);
+  assert.equal(DEFAULT_PERFORMANCE.reviewMode,'precise');
+  assert.equal(normalizePerformance().reviewMode,'precise');
+  assert.equal(normalizePerformance({reviewMode:'fast'}).reviewMode,'fast');
+  assert.match(key,/^review-v2:/);
 });
 
 test('full-engine parts cover each WASM file and stay below static asset limits', () => {

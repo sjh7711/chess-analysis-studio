@@ -7,8 +7,8 @@ const move={from:'e2',to:'e4',color:'w'};
 test('ten move categories use expected-point loss with symmetric black evaluations',()=>{
   assert.equal(Object.keys(MOVE_GRADES).length,10);
   for(const [loss,key] of [[0,'best'],[10,'excellent'],[30,'good'],[75,'inaccuracy'],[150,'mistake'],[300,'blunder']]){
-    assert.equal(classifyMove(cp(0),cp(-loss),move).key,key);
-    assert.equal(classifyMove(cp(0),cp(loss),{...move,color:'b'}).key,key);
+    assert.equal(classifyMove(cp(0,loss===0?'e2e4':undefined),cp(-loss),move).key,key);
+    assert.equal(classifyMove(cp(0,loss===0?'e2e4':undefined),cp(loss),{...move,color:'b'}).key,key);
   }
   assert.equal(expectedPoints({type:'cp',value:0}),0.5);
   assert.equal(classifyMove(cp(800),cp(500),move).key,'inaccuracy');
@@ -28,17 +28,30 @@ test('a good accepted bishop sacrifice is distinguished from a bad or unverified
   assert.notEqual(classifyMove(before,cp(-300,undefined,[{pv}]),sacrifice).key,'brilliant');
   assert.notEqual(classifyMove(before,cp(0,undefined,[{pv:pv.slice(0,1)}]),sacrifice).key,'brilliant');
 });
-test('misses require the opponent to have created a new winning chance, or a missed forced mate',()=>{
+test('misses require a new winning chance; mate changes follow expected-point loss',()=>{
   const before=cp(350),after=cp(0);
   assert.equal(classifyMove(before,after,move,{previous:cp(-50)}).key,'miss');
   assert.equal(classifyMove(before,after,move,{previous:cp(350)}).key,'blunder');
-  assert.equal(classifyMove({score:{type:'mate',value:3,winner:'w'}},cp(900),move).key,'miss');
-  assert.equal(classifyMove(cp(-900),{score:{type:'mate',value:-1,winner:'b'}},move).key,'blunder');
+  assert.equal(classifyMove({score:{type:'mate',value:3,winner:'w'}},cp(900),move).key,'good');
+  assert.equal(classifyMove(cp(-900),{score:{type:'mate',value:-1,winner:'b'}},move).key,'good');
+  assert.equal(classifyMove(cp(0),{score:{type:'mate',value:-1,winner:'b'}},move).key,'blunder');
+  assert.equal(classifyMove({score:{type:'mate',value:3,winner:'w'}},cp(0),move,{previous:cp(0)}).key,'miss');
+});
+
+test('zero loss alone does not turn an unranked or tied move into the engine top choice',()=>{
+  assert.equal(classifyMove(cp(0,'d2d4'),cp(0),move).key,'excellent');
+  assert.equal(classifyMove(cp(0,'d2d4'),cp(30),move).key,'excellent');
+  assert.equal(classifyMove(cp(0,'e2e4'),cp(0),move).key,'best');
+});
+
+test('a stale second candidate cannot produce a great-move label',()=>{
+  const before={...cp(70,'e2e4'),depth:16,lines:[{multipv:2,depth:12,score:{type:'cp',value:-100}}]};
+  assert.equal(classifyMove(before,cp(70),move).key,'best');
 });
 test('book moves need an actual opening match and do not hide engine-detected mistakes',()=>{
   const chess=new Chess(),e4=chess.move('e4');
   assert.equal(classifyMove(cp(30),cp(30),e4).key,'book');
   assert.equal(classifyMove(cp(30),cp(-300),e4).key,'blunder');
   const far={...e4,before:e4.before.replace('0 1','0 30')};
-  assert.equal(classifyMove(cp(30),cp(30),far).key,'best');
+  assert.equal(classifyMove(cp(30),cp(30),far).key,'excellent');
 });

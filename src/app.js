@@ -1,10 +1,11 @@
-import { Chess, parseGame, gameAt, classifyMove, MOVE_GRADES, GRADING_BASIS, formatScore, scoreValue, pvToSan, exportPgn } from './chess-core.js';
+import { Chess, parseGame, gameAt, classifyMove, hasMoveReview, assessedMoveResult, MOVE_GRADES, GRADING_BASIS, formatScore, scoreValue, pvToSan, exportPgn } from './chess-core.js';
 import { StockfishEngine } from './engine.js';
-import { ENGINES, engineId, normalizePerformance, supportedThreads, searchOptions, reviewOptions, analysisKey, DEFAULT_PERFORMANCE } from './engine-options.js';
+import { reviewMove } from './review.js';
+import { ENGINES, engineId, normalizePerformance, supportedThreads, searchOptions, reviewOptions, analysisKey } from './engine-options.js';
 import { pieceSvg, pieceSnapshot, pieceTransitions, StepNavigation, capturedPieces, capturedMarkup } from './pieces.js';
 import { BoardAnnotations } from './annotations.js';
 import { SAMPLE_PGN } from './sample.js';
-import { AnalysisLine, PlaybackClock, PIECE_NAMES, editedPosition, materialBalance, exportLine, restoreResults, moveText } from './study.js';
+import { AnalysisLine, PlaybackClock, PIECE_NAMES, cloneChess, editedPosition, materialBalance, exportLine, restoreResults, moveText } from './study.js';
 import { createInsightLine, describeMove, explainMistake, moveLabel, moveTurn } from './insight.js';
 import { completionAlerts } from './notification-center.js';
 import { MoveSounds } from './move-sounds.js';
@@ -14,7 +15,7 @@ const moveSounds=new MoveSounds({button:$('move-sound')});
 const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
 const STORAGE = 'chessreview.v1';
 const LIBRARY = 'chessreview.library.v1';
-let removedGame = null, exportFilename = 'chess-review.pgn', insightContext = null, insightMarkup = '';
+let removedGame = null, exportFilename = 'chess-review.pgn', insightContext = null, insightMarkup = '', recommendationMarkup = '';
 let coachCache=null;
 let moveListScroll=0, restoreMoveListScroll=false;
 let renderedBoard=null, renderedFlipped=false, editorPieceId=0;
@@ -23,9 +24,9 @@ const stepNavigation=new StepNavigation(()=>pieceMotions.size>0);
 const settings = { 12: true, 16: true, 20: true, 24: true };
 const maxThreads = supportedThreads();
 let selectedEngine = 'lite', performanceOptions = normalizePerformance({}, maxThreads);
-const state = { game:parseGame(SAMPLE_PGN), index:59, flipped:false, results:new Map(), line:null, editor:null, playing:false, selected:null, mode:null, preview:null, error:null, tab:'moves', chartMode:'game' };
+const state = { game:parseGame(SAMPLE_PGN), index:59, flipped:false, results:new Map(), line:null, editor:null, playing:false, selected:null, mode:null, error:null, tab:'moves', chartMode:'game' };
 const annotations=new BoardAnnotations($('board'),{isFlipped:()=>state.flipped,enabled:()=>!state.editor,toggleButton:$('annotation-mode'),clearButton:$('annotation-clear')});
-let engine = null, engineConfig = '', generation = 0, debounce, toastTimer, pendingPromotion, draggedSquare, suppressClickUntil = 0, previewPaint = 0;
+let engine = null, engineConfig = '', generation = 0, debounce, toastTimer, pendingPromotion, draggedSquare, suppressClickUntil = 0;
 const playback = new PlaybackClock(advancePlayback);
 window.addEventListener('analysis-notice',({detail:{message,test}})=>{
   toast(message);
@@ -40,12 +41,13 @@ try {
     if (settings[saved.depth]) $('depth').value = saved.depth;
     selectedEngine = engineId(saved.engine);
     performanceOptions = normalizePerformance(saved.performance, maxThreads);
+    if (saved.analysisVersion!==2) performanceOptions.reviewMode='precise';
     state.results = restoreResults(saved,state.game.positions.length,ENGINES[selectedEngine].name);
     for (const [index,result] of state.results) if (!isCached(result)) state.results.delete(index);
   }
 } catch { /* Unavailable or outdated local storage never prevents startup. */ }
 
-function snapshotCurrent() { return { input:state.game.input, kind:state.game.kind, index:state.index, depth:$('depth').value, engine:ENGINES[selectedEngine].name, performance:performanceOptions, results:[...state.results] }; }
+function snapshotCurrent() { return { analysisVersion:2, input:state.game.input, kind:state.game.kind, index:state.index, depth:$('depth').value, engine:ENGINES[selectedEngine].name, performance:performanceOptions, results:[...state.results] }; }
 function persist() {
   try { localStorage.setItem(STORAGE, JSON.stringify(snapshotCurrent())); }
   catch { /* Private browsing and storage limits are non-fatal. */ }
@@ -64,15 +66,19 @@ function displayScore(score) { return formatScore(score, evaluationColor()); }
 function displayValue(score) { return scoreValue(score, evaluationColor()); }
 function evaluationHint() { return `${evaluationSide()} 기준 (+ ${evaluationSide()} 우세, − ${state.flipped ? '백' : '흑'} 우세)`; }
 function currentResult() { return state.line ? state.line.results.get(state.line.cursor) : state.results.get(state.index); }
-function gradeAt(index) { return classifyMove(state.results.get(index-1),state.results.get(index),state.game.moves[index-1],{previous:state.results.get(index-2)}); }
-function shownResult() { return state.editor ? null : currentResult() || (state.preview?.fen === currentChess().fen() ? state.preview : null); }
+function gradeAt(index) {
+  const before=state.results.get(index-1),after=state.results.get(index),move=state.game.moves[index-1];
+  return hasMoveReview(before,after,move) ? classifyMove(before,after,move,{previous:state.results.get(index-2)}) : null;
+}
+function reviewedPositionCount() { return state.game.positions.filter((_,index)=>isCached(state.results.get(index)) && (!index || hasMoveReview(state.results.get(index-1),state.results.get(index),state.game.moves[index-1]))).length; }
+function shownResult() { return state.editor ? null : currentResult(); }
 function configKey() { return analysisKey(selectedEngine,Number($('depth').value),performanceOptions); }
 function isCached(result) {
   if (!result) return false;
   if (result.terminal) return true;
   if (result.overview && performanceOptions.reviewMode === 'precise') return false;
   if (result.configKey) return result.configKey === configKey();
-  return selectedEngine === 'lite' && configKey() === analysisKey('lite',Number($('depth').value),DEFAULT_PERFORMANCE) && result.requestedDepth === Number($('depth').value);
+  return false;
 }
 function createEngine(run) {
   const nextConfig = `${selectedEngine}:${performanceOptions.hash}:${performanceOptions.threads}`;
@@ -93,7 +99,6 @@ function stopJob() {
   clearTimeout(debounce);
   engine?.cancel();
   state.mode = null;
-  state.preview = null;
   $('engine-download').hidden = true;
 }
 
@@ -107,25 +112,19 @@ function scheduleAnalysis(autoReview = false) {
     const work = analyzeCurrent();
     const run = generation;
     await work;
-    if (autoReview && run === generation && game === state.game && !state.line && !state.editor && !state.error && game.moves.length && [...state.results.values()].filter(isCached).length < game.positions.length) analyzeGame();
+    if (autoReview && run === generation && game === state.game && !state.line && !state.editor && !state.error && game.moves.length && reviewedPositionCount() < game.positions.length) analyzeGame();
   }, 140);
-}
-
-function updatePreview(info, fen, run) {
-  if (run !== generation || (state.line ? state.line.position().fen() : state.game.positions[state.index]) !== fen) return;
-  if (!state.preview || state.preview.fen !== fen) state.preview = { fen, lines:[] };
-  state.preview.lines = [...state.preview.lines.filter(line => line.multipv !== info.multipv), info].sort((a,b) => a.multipv - b.multipv);
-  if (info.multipv === 1) { state.preview.score = info.score; state.preview.depth = info.depth; state.preview.bestmove = info.pv[0]; }
-  if (state.preview.score && !currentResult() && performance.now()-previewPaint >= 100) { previewPaint=performance.now(); renderAnalysis(); }
 }
 
 async function analyzeCurrent(force = false) {
   if (state.mode === 'full' || state.editor) return;
-  if (!force && isCached(currentResult()) && !currentResult().overview) { renderAnalysis(); schedulePlayback(); return; }
+  const cached=currentResult(),position=state.line?.cursor??state.index,results=state.line?state.line.results:state.results;
+  const move=state.line?state.line.steps[position-1]:state.game.moves[position-1],before=results.get(position-1);
+  const needsReview=move && isCached(before) && !hasMoveReview(before,cached,move);
+  if (!force && isCached(cached) && !cached.overview && !needsReview) { renderAnalysis(); schedulePlayback(); return; }
   stopJob();
   const run = generation;
   const chess = currentChess();
-  const fen = chess.fen();
   const index = state.index;
   const line = state.line;
   const cursor = line?.cursor;
@@ -136,16 +135,22 @@ async function analyzeCurrent(force = false) {
   if (state.line) renderStudy();
   try {
     engine = createEngine(run);
-    const result = await engine.analyze(chess, { ...options, onInfo:info => updatePreview(info, fen, run) });
+    let result = !force && isCached(cached) && !cached.overview ? {...cached} : await engine.analyze(chess, options);
     if (run !== generation) return;
     result.requestedDepth = options.depth;
     result.configKey = configKey();
+    if (move && isCached(before)) {
+      const root=line ? cloneChess(line.base) : gameAt(state.game,index-1);
+      if (line) for (const step of line.steps.slice(0,position-1)) root.move(step.uci);
+      result=await reviewMove(engine,root,before,result,move,before.overview?reviewOptions(Number($('depth').value),performanceOptions):options);
+      if (run!==generation) return;
+    }
     if (line) line.results.set(cursor,result);
     else { state.results.set(index, result); persist(); }
   } catch (error) {
     if (run === generation && error.name !== 'AbortError') { state.error = error.message; toast(error.message, true); }
   } finally {
-    if (run === generation) { state.mode = null; state.preview = null; renderResults(); schedulePlayback(); }
+    if (run === generation) { state.mode = null; renderResults(); schedulePlayback(); }
   }
 }
 
@@ -171,35 +176,36 @@ async function analyzeGame(restart = false) {
     engine = createEngine(run);
     for (let index = 0; index < state.game.positions.length; index++) {
       if (run !== generation) return;
-      if (!isCached(state.results.get(index))) {
-        state.preview = null;
-        const fen = chess.fen();
-        const detailed = index === state.index || performanceOptions.reviewMode === 'precise';
-        const result = await engine.analyze(chess, { ...(detailed ? options : overviewOptions), onInfo:info => updatePreview(info, fen, run) });
+      let result=state.results.get(index),changed=false;
+      if (!isCached(result)) {
+        const detailed = performanceOptions.reviewMode === 'precise';
+        result = await engine.analyze(chess, detailed ? options : overviewOptions);
         if (run !== generation) return;
         result.requestedDepth = options.depth;
         result.configKey = configKey();
         result.overview = !detailed;
-        state.results.set(index, result);
         analyzed++;
-        state.preview = null;
+        changed=true;
+      }
+      const before=state.results.get(index-1),played=state.game.moves[index-1];
+      if (played && before && !hasMoveReview(before,result,played)) {
+        result=await reviewMove(engine,gameAt(state.game,index-1),before,result,played,before.overview?overviewOptions:options);
+        if (run!==generation) return;
+        changed=true;
+      }
+      if (changed) {
+        state.results.set(index,result);
         renderResults();
         if (analyzed % 5 === 0) persist();
       }
       const move = state.game.moves[index];
       if (move) chess.move({ from:move.from, to:move.to, promotion:move.promotion });
     }
-    while (run === generation && currentResult()?.overview) {
-      const detailedIndex=state.index;
-      const result = await engine.analyze(currentChess(), options);
-      if (run !== generation) return;
-      state.results.set(detailedIndex,{...result,requestedDepth:options.depth,configKey:configKey()});
-    }
     if (run === generation && analyzed) completionAlerts.complete(run,`${state.game.headers.White || '백'} vs ${state.game.headers.Black || '흑'} · ${state.game.positions.length}개 국면 분석 완료`);
   } catch (error) {
     if (run === generation && error.name !== 'AbortError') { state.error = error.message; toast(error.message, true); }
   } finally {
-    if (run === generation) { completionAlerts.cancel(run); state.mode = null; state.preview = null; renderResults(); persist(); }
+    if (run === generation) { completionAlerts.cancel(run); state.mode = null; renderResults(); persist(); }
   }
 }
 
@@ -288,7 +294,7 @@ function renderCoach() {
   const cursor=state.line ? state.line.cursor : state.index;
   const move=state.line ? state.line.steps[cursor-1] : state.game.moves[cursor-1];
   const results=state.line ? state.line.results : state.results;
-  const before=results.get(cursor-1), after=results.get(cursor), previous=results.get(cursor-2);
+  const before=results.get(cursor-1), after=hasMoveReview(before,results.get(cursor),move) ? results.get(cursor) : null, previous=results.get(cursor-2);
   let comment;
   if (state.editor) comment={grade:null,text:'기물 배치를 적용하면 이 국면에서 둘 수 있는 수를 분석합니다.'};
   else if (!move) comment={grade:null,text:`${currentChess().turn()==='w'?'백':'흑'} 차례입니다. 추천 수순을 열거나 보드에서 수를 두어 살펴보세요.`};
@@ -313,7 +319,7 @@ function renderAnalysis() {
   renderCoach();
   $('arrow-label').textContent=state.line?.kind==='pv'?'다음 재생 수 표시':'추천 수 표시';
   $('show-arrow').setAttribute('aria-label',$('arrow-label').textContent);
-  $('evaluation-basis').textContent = `평가 · ${evaluationSide()} 기준`;
+  $('evaluation-basis').textContent = `평가 · ${evaluationSide()} 기준${busy?' · 분석 중':''}`;
   $('rail-score').textContent = displayScore(result?.score);
   const rail = $('eval-fill').parentElement;
   rail.classList.toggle('flipped',state.flipped);
@@ -322,7 +328,7 @@ function renderAnalysis() {
   const value = result?.score ? displayValue(result.score) : 0;
   $('eval-fill').style.height = `${100 / (1 + Math.exp(-Math.max(-2000,Math.min(2000,value))/230))}%`;
   $('rail-score').style.color = (value < -180) !== state.flipped ? 'var(--eval-rail-light)' : 'var(--eval-rail-dark)';
-  const complete = [...state.results.values()].filter(isCached).length;
+  const complete = reviewedPositionCount();
   $('analyze-game').textContent = state.mode === 'full' ? '분석 중단' : `${state.game.moves.length ? (complete === state.game.positions.length ? '전체 대국 다시 분석' : complete > 0 ? '남은 대국 분석' : '전체 대국 분석') : '현재 국면 분석'}`;
   $('depth').disabled = state.mode === 'full' || !!state.editor;
   $('analyze-position').disabled = state.mode === 'full' || !!state.editor;
@@ -339,7 +345,7 @@ function renderAnalysis() {
   $('pv-lines').style.setProperty('--pv-columns',Math.min(performanceOptions.multipv,3));
   if (result?.lines?.length) {
     const fen = currentChess().fen();
-    $('pv-lines').innerHTML = result.lines.map((line,i) => {
+    const markup = result.lines.map((line,i) => {
       const position = new Chess(fen);
       const number = position.moveNumber();
       let move, reply;
@@ -353,8 +359,19 @@ function renderAnalysis() {
       const squares = `${move.from} ${move.captured ? '×' : '→'} ${move.to}${move.promotion ? `=${move.promotion.toUpperCase()}` : ''}`;
       return `<button class="pv-row${i === 0 ? ' pv-best' : ''}" data-pv="${i}" aria-label="${escape(`${i+1}순위 ${move.color === 'w' ? '백' : '흑'} ${moveLabel}, ${evaluationSide()} 기준 평가 ${score}, 전체 예상 수순 탐색`)}" title="${escape(`${moveLabel} · ${pvToSan(fen,line.pv)}`)} · 깊이 ${line.depth}"><span class="pv-number">${i+1}</span><span class="pv-score">${score}</span><span class="pv-move"><span class="pv-piece">${pieceSvg(move.piece,move.color)}</span><strong>${escape(squares)}</strong></span><span class="pv-reply">${escape(replyText)}</span><span class="pv-play">전체 수순 보기</span></button>`;
     }).join('');
-  } else $('pv-lines').innerHTML = `<p class="empty-text">${escape(result?.terminal || (state.mode === 'full' ? '이 국면의 분석 차례를 기다리고 있습니다.' : state.error || '분석 중…'))}</p>`;
+    setRecommendationContent(markup);
+  } else {
+    const markup=`<p class="empty-text">${escape(result?.terminal || (state.mode === 'full' ? '이 국면의 분석 차례를 기다리고 있습니다.' : state.error || '분석 중 · 완료 후 추천 수를 표시합니다.'))}</p>`;
+    setRecommendationContent(markup);
+  }
+  $('pv-lines').setAttribute('aria-busy',String(busy));
   renderArrow();
+}
+
+function setRecommendationContent(markup) {
+  if (recommendationMarkup===markup) return;
+  recommendationMarkup=markup;
+  $('pv-lines').innerHTML=markup;
 }
 
 function renderMoves(scroll = false) {
@@ -412,7 +429,7 @@ function renderInsight() {
     } else message += ` · ${escape(grade.reason || '국면의 평가를 잘 유지했습니다.')}`;
   } else if (state.mode === 'full') message = '앞뒤 국면을 모두 분석하면 이 수의 평가가 표시됩니다.';
   else if (move) message = `<strong>${escape(moveLabel(move))}</strong> · 전체 대국을 분석하면 수의 분류를 확인할 수 있어요.`;
-  const insight = !state.editor && !state.line && explainMistake(move,before,after,{previous:state.results.get(state.index-2)});
+  const insight = !state.editor && !state.line && grade && explainMistake(move,before,after,{previous:state.results.get(state.index-2)});
   if (insight) {
     insightContext = { game:state.game,index:state.index,insight,before,after };
     renderInsightDetail(insightContext);
@@ -434,13 +451,14 @@ function setInsightContent(markup) {
 
 function renderInsightDetail({game,index,insight,before,after}) {
   const move = game.moves[index-1];
+  after=assessedMoveResult(before,after,move);
   $('insight-title').textContent = `${moveLabel(move)} · ${insight.grade.label}`;
   $('insight-evaluation').textContent = `${insight.lossText} · 수 전 ${displayScore(before.score)} → 수 후 ${displayScore(after.score)} (${evaluationSide()} 기준)`;
   $('insight-playback').textContent = state.line ? `${state.line.title} · ${state.line.cursor} / ${state.line.steps.length}` : '';
   const section = (kind,title,line,fact) => {
     const selected = state.line?.reviewIndex === index && state.line.reviewKind === kind;
     const full=selected && state.line.reviewScope==='full';
-    const coreLabel=kind==='response'?'핵심 응수':'대안 첫 장면';
+    const coreLabel=kind==='response'?'상대 응수':'최선의 수';
     return `<section class="insight-line${selected ? ' selected-line' : ''}"><h3>${title}${selected ? `<span class="insight-selected">${full?'전체 수순 탐색':'핵심 장면 탐색'}</span>` : ''}</h3><p>${escape(fact || '저장된 분석에 탐색 가능한 수순이 없습니다. 이 국면을 다시 분석해 주세요.')}</p>${line.moves.length ? `<div class="insight-actions"><button class="button outline" data-insight-play="${kind}" data-insight-scope="core" aria-pressed="${selected&&!full}">${coreLabel} 보기 · ${line.focus.length}번 이동</button>${line.moves.length>line.focus.length?`<button class="text-button insight-full" data-insight-play="${kind}" data-insight-scope="full" aria-pressed="${full}">전체 예상 수순 보기 · ${line.moves.length}번 이동</button>`:''}</div>${line.focus.note?`<p class="insight-note">${escape(line.focus.note)}</p>`:''}${kind==='response'&&insight.riskFact?`<p class="insight-risk">장기 예상: ${escape(insight.riskFact)}</p>`:''}` : ''}</section>`;
   };
   setInsightContent(`${section('response','상대가 이용하는 수',insight.response,insight.responseFact)}${section('alternative','대신 둘 수 있었던 수',insight.alternative,insight.alternativeFact)}${insight.reason ? `<details class="insight-more"><summary>상세 설명</summary><p>${escape(insight.reason)}</p></details>` : ''}`);
@@ -450,6 +468,7 @@ function startInsight(kind,scope='core') {
   if (!insightContext || state.game !== insightContext.game || !['response','alternative'].includes(kind)) return;
   const line = createInsightLine(insightContext,kind,scope);
   if (!line) return;
+  line.seek(1);
   pausePlayback(); stopJob();
   state.line = line; state.selected = null; state.tab = 'study';
   state.chartMode = 'line';
@@ -507,7 +526,7 @@ function renderReview() {
     if (grade) { counts[move.color][grade.key]++; reviewed++; if (grade.severity >= 2) critical.push({ index:i+1,move,...grade }); }
   });
   if (!reviewed) { $('review-content').innerHTML = '<div class="summary-empty">전체 대국 분석 후 수별 분류가 표시됩니다.</div>'; return; }
-  $('review-content').innerHTML = `<div class="summary-counts">${['w','b'].map(color => `<div class="summary-player"><h4>${color === 'w' ? '♔' : '♚'} ${escape(state.game.headers[color === 'w' ? 'White' : 'Black'] || (color === 'w' ? '백' : '흑'))}</h4>${Object.entries(MOVE_GRADES).map(([key,{label,symbol}]) => `<div class="summary-stat"><span><i class="grade-icon ${key}" aria-hidden="true">${symbol}</i>${label}</span><b>${counts[color][key]}</b></div>`).join('')}</div>`).join('')}</div><p class="review-explanation">${reviewed} / ${state.game.moves.length}번 이동 분류 완료 · ${[...state.results.values()].some(r=>r.overview)?'빠른 검토 포함':'정밀 검토'}</p><details class="grading-guide"><summary>수 분류 기준</summary><p>${GRADING_BASIS}</p><p>탁월수: 예상 응수에서 손해를 감수한 기물 희생으로 국면을 유지한 경우. 훌륭한 수: 다른 후보보다 예상 승점을 10%p 이상 지킨 최선의 수. 놓친 기회: 상대 실수로 생긴 승리 기회를 놓친 경우. 이론: 공개 오프닝 목록과 일치한 첫 10수 안의 수입니다.</p><p>탁월수와 훌륭한 수는 확인된 수순을 바탕으로 보수적으로 추정합니다. 이론은 등록된 수순에 한하며 모든 오프닝을 포함하지는 않습니다.</p><p>예상 승점은 두는 쪽의 폰 단위 평가를 1 ÷ (1 + exp(−평가 ÷ 2.5))로 환산합니다. 체크메이트는 0 또는 1로 계산합니다.</p><p><a href="https://support.chess.com/en/articles/8572705-how-are-moves-classified-what-is-a-blunder-or-brilliant-etc" target="_blank" rel="noopener noreferrer">Chess.com 공식 분류 설명</a> · <a href="https://github.com/lichess-org/chess-openings" target="_blank" rel="noopener noreferrer">오프닝 자료 · CC0</a></p></details>${critical.length ? '<h3>다시 살펴볼 수</h3>' : ''}${critical.sort((a,b) => b.pointsLoss-a.pointsLoss).slice(0,5).map(item => `<button class="critical-button" data-review-index="${item.index}"><span>${escape(item.move.before.split(' ')[5])}${item.move.color === 'w' ? '.' : '...'} ${escape(item.move.san)} <small>(${item.move.color === 'w' ? '백' : '흑'})</small></span><span>${item.label} ↗</span></button>`).join('')}`;
+  $('review-content').innerHTML = `<div class="summary-counts">${['w','b'].map(color => `<div class="summary-player"><h4>${color === 'w' ? '♔' : '♚'} ${escape(state.game.headers[color === 'w' ? 'White' : 'Black'] || (color === 'w' ? '백' : '흑'))}</h4>${Object.entries(MOVE_GRADES).map(([key,{label,symbol}]) => `<div class="summary-stat"><span><i class="grade-icon ${key}" aria-hidden="true">${symbol}</i>${label}</span><b>${counts[color][key]}</b></div>`).join('')}</div>`).join('')}</div><p class="review-explanation">${reviewed} / ${state.game.moves.length}번 이동 분류 완료 · ${[...state.results.values()].some(r=>r.overview)?'빠른 검토 포함':'정밀 검토'}</p><details class="grading-guide"><summary>수 분류 기준</summary><p>${GRADING_BASIS}</p><p>탁월수: 예상 응수에서 손해를 감수한 기물 희생으로 국면을 유지한 경우. 훌륭한 수: 같은 깊이의 다른 후보보다 예상 승점을 10%p 이상 지킨 최선의 수. 놓친 기회: 상대 실수로 생긴 승리 기회를 놓친 경우. 이론: 공개 오프닝 목록과 일치한 첫 10수 안의 수입니다.</p><p>탁월수·훌륭한 수·놓친 기회의 세부 조건은 앱 자체 추정이며, Chess.com의 비공개 레이팅별 판정과 일치하지 않을 수 있습니다. 이론은 등록된 수순에 한하며 모든 오프닝을 포함하지는 않습니다.</p><p>최선수와 실전 수는 같은 출발 국면에서 비교합니다. 그래프 점수는 각 국면을 독립적으로 분석한 값입니다. 예상 승점은 두는 쪽의 폰 단위 평가를 1 ÷ (1 + exp(−평가 ÷ 2.5))로 환산합니다. 체크메이트는 0 또는 1로 계산합니다.</p><p><a href="https://support.chess.com/en/articles/8572705-how-are-moves-classified-what-is-a-blunder-or-brilliant-etc" target="_blank" rel="noopener noreferrer">Chess.com 공식 분류 설명</a> · <a href="https://github.com/lichess-org/chess-openings" target="_blank" rel="noopener noreferrer">오프닝 자료 · CC0</a></p></details>${critical.length ? '<h3>다시 살펴볼 수</h3>' : ''}${critical.sort((a,b) => b.pointsLoss-a.pointsLoss).slice(0,5).map(item => `<button class="critical-button" data-review-index="${item.index}"><span>${escape(item.move.before.split(' ')[5])}${item.move.color === 'w' ? '.' : '...'} ${escape(item.move.san)} <small>(${item.move.color === 'w' ? '백' : '흑'})</small></span><span>${item.label} ↗</span></button>`).join('')}`;
 }
 
 function renderResults() { renderAnalysis(); renderMoves(); renderChart(); renderReview(); renderStudy(); }
@@ -544,7 +563,7 @@ function navigate(index,{analyze=true}={}) {
   const previous=state.line?null:state.index;
   pausePlayback();
   state.index = Math.max(0,Math.min(state.game.moves.length,index));
-  state.line = null; state.editor = null; state.selected = null; state.preview = null;
+  state.line = null; state.editor = null; state.selected = null;
   if (state.tab === 'study') state.tab = 'moves';
   $('editor-panel').hidden = true;
   state.chartMode = 'game';
@@ -572,6 +591,7 @@ function startPv(index) {
   if (!recommendation) return;
   const line = new AnalysisLine(currentChess(),recommendation.pv,currentResult());
   if (!line.steps.length) { toast('재생 가능한 추천 수순이 없습니다.',true); return; }
+  line.seek(1);
   line.kind = 'pv';
   line.title = '추천 수 · 전체 예상 수순';
   line.sourceScore = recommendation.score;
@@ -802,6 +822,7 @@ function setGame(game, saved = null) {
   if(saved){
     state.index=Math.min(game.moves.length,Math.max(0,Number(saved.index)||0));
     selectedEngine=engineId(saved.engine);performanceOptions=normalizePerformance(saved.performance,maxThreads);
+    if (saved.analysisVersion!==2) performanceOptions.reviewMode='precise';
     if(settings[saved.depth])$('depth').value=saved.depth;
     state.results=restoreResults(saved,game.positions.length,ENGINES[selectedEngine].name);
     for(const [index,result] of state.results)if(!isCached(result))state.results.delete(index);
@@ -830,11 +851,11 @@ $('show-arrow').onchange = renderArrow;
 $('variation-return').onclick = () => navigate(state.index);
 $('analyze-position').onclick = () => analyzeCurrent(true);
 $('analyze-game').onclick = () => {
-  const restart = state.mode !== 'full' && [...state.results.values()].filter(isCached).length === state.game.positions.length;
+  const restart = state.mode !== 'full' && reviewedPositionCount() === state.game.positions.length;
   analyzeGame(restart);
 };
 $('restart-game').onclick = () => analyzeGame(true);
-$('depth').onchange = () => { stopJob(); state.results.clear(); state.line?.results.clear(); renderResults(); persist(); scheduleAnalysis(!state.line); };
+$('depth').onchange = () => { stopJob(); state.results.clear(); state.line?.results.clear(); insightContext=null; renderResults(); persist(); scheduleAnalysis(!state.line); };
 $('engine-settings-open').onclick = () => {
   $('engine-choice').value = selectedEngine;
   $('settings-depth').value = $('depth').value;
@@ -860,6 +881,7 @@ $('engine-settings-form').onsubmit = event => {
   pausePlayback(); stopJob();
   selectedEngine=nextEngine;performanceOptions=nextPerformance;$('depth').value=nextDepth;
   state.results.clear();state.line?.results.clear();state.error=null;
+  insightContext=null;
   renderResults();persist();scheduleAnalysis();
   toast('설정을 적용했습니다. 현재 국면을 새로 분석합니다.');
 };

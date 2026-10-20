@@ -1,4 +1,4 @@
-import { Chess, classifyMove, GRADING_BASIS, formatScore, gameAt, scoreValue, uciMove } from './chess-core.js';
+import { Chess, classifyMove, assessedMoveResult, GRADING_BASIS, formatScore, gameAt, scoreValue, uciMove } from './chess-core.js';
 import { AnalysisLine, PIECE_NAMES, materialBalance, moveText } from './study.js';
 
 const side = color => color === 'w' ? '백' : '흑';
@@ -9,10 +9,10 @@ const mateWinner = score => score?.type === 'mate' ? (scoreValue(score) > 0 ? 'w
 
 // Both branches stay anchored to the reviewed move, even when switching during playback.
 export function createInsightLine({game,index,insight,before,after}, kind, scope='core') {
-  if (!['response','alternative'].includes(kind) || !['core','full'].includes(scope)) return null;
+  if (!insight || !['response','alternative'].includes(kind) || !['core','full'].includes(scope)) return null;
   const response = kind === 'response';
   const source = response ? insight.response : insight.alternative;
-  const result = response ? after : before;
+  const result = response ? assessedMoveResult(before,after,game.moves[index-1]) : before;
   const count=scope==='core' ? source.focus.length : source.pv.length;
   const line = new AnalysisLine(gameAt(game,response ? index : index-1),source.pv.slice(0,count),result);
   if (!line.steps.length) return null;
@@ -120,6 +120,7 @@ function distantRisk(consequence) {
 export function explainMistake(move, before, after, context = {}) {
   const grade = move && classifyMove(before,after,move,context);
   if (!grade || grade.severity < 1) return null;
+  after=assessedMoveResult(before,after,move);
   const player = side(move.color), opponent = side(move.color === 'w' ? 'b' : 'w');
   const response = focusContinuation(move,continuation(move.after,after)), alternative = focusContinuation(move,continuation(move.before,before),true);
   const sign = move.color === 'w' ? 1 : -1;
@@ -250,6 +251,7 @@ export function describeMove(move,before,after,context = {}) {
   if (!move) return {grade:null,text:'기보에서 수를 선택하면 그 수의 의미를 설명합니다.'};
   const grade=classifyMove(before,after,move,context);
   if (!grade || grade.severity<1) return {grade,text:grade?.reason && ['brilliant','great'].includes(grade.key) ? `${grade.reason} ${basicMoveComment(move)}` : basicMoveComment(move)};
+  after=assessedMoveResult(before,after,move);
   const reply=focusContinuation(move,continuation(move.after,after)), alternative=continuation(move.before,before);
   const opponent=reply.moves[0];
   if (after.score.type==='mate' && mateWinner(after.score)!==move.color) return {grade,text:after.score.value===0 ? '체크메이트당했습니다.' : `상대에게 ${Math.abs(after.score.value)}수 안의 체크메이트 수순을 허용했습니다.${opponent ? ` ${firstMoveFact(reply)}` : ''}`};

@@ -12,7 +12,7 @@ export function engineChunks(parallel = false) {
   size: Math.min(ENGINE_CHUNK_SIZE, size - i * ENGINE_CHUNK_SIZE),
 }));
 }
-export const DEFAULT_PERFORMANCE = Object.freeze({ movetime: 0, multipv: 3, hash: 32, threads: 1, reviewMode: 'fast' });
+export const DEFAULT_PERFORMANCE = Object.freeze({ movetime: 0, multipv: 3, hash: 32, threads: 1, reviewMode: 'precise' });
 export function engineId(value) { return Object.keys(ENGINES).find(id => id === value || ENGINES[id].name === value) || 'lite'; }
 export function supportedThreads(isolated = globalThis.crossOriginIsolated, cores = globalThis.navigator?.hardwareConcurrency || 1) {
   return isolated && typeof SharedArrayBuffer !== 'undefined' ? [1, 2, 4, 8].filter(n => n <= cores).at(-1) || 1 : 1;
@@ -20,7 +20,7 @@ export function supportedThreads(isolated = globalThis.crossOriginIsolated, core
 export function normalizePerformance(value = {}, maxThreads = 8) {
   value ||= {};
   return {
-    reviewMode: value.reviewMode === 'precise' ? 'precise' : 'fast',
+    reviewMode: value.reviewMode === 'fast' ? 'fast' : 'precise',
     movetime: [0, 500, 1000, 3000, 5000, 10000, 30000].includes(value.movetime) ? value.movetime : 0,
     multipv: [1, 2, 3, 5].includes(value.multipv) ? value.multipv : 3,
     hash: [16, 32, 64, 128, 256].includes(value.hash) ? value.hash : 32,
@@ -33,7 +33,7 @@ export function searchOptions(depth, performance = DEFAULT_PERFORMANCE) {
 }
 export function analysisKey(id, depth, performance) {
   const options = searchOptions(depth, performance);
-  return [id, options.depth, options.movetime, options.multipv, options.hash, options.threads].join(':');
+  return ['review-v2',id, options.depth, options.movetime, options.multipv, options.hash, options.threads].join(':');
 }
 
 export function reviewOptions(depth, performance = DEFAULT_PERFORMANCE) {

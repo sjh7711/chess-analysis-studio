@@ -1,5 +1,38 @@
-import { parseInfo, positionCommand, terminalResult } from './chess-core.js';
+import { parseInfo, positionCommand, terminalResult, uciMove } from './chess-core.js';
 import { workerUrl } from './engine-options.js';
+
+function recordIteration(pending, info) {
+  if (!pending.rootMoves.has(info.pv[0]) || info.multipv < 1 || info.multipv > pending.multipv) return;
+  const previous = pending.rootLines.get(info.pv[0]);
+  if (!previous || info.depth >= previous.depth) pending.rootLines.set(info.pv[0], info);
+  let iteration = pending.iterations.get(info.depth);
+  // A repeated first line begins another batch at this depth. Keep its previous
+  // complete snapshot until every candidate in the replacement batch arrives.
+  if (!iteration || (info.multipv === 1 && iteration.has(1))) {
+    iteration = new Map();
+    pending.iterations.set(info.depth, iteration);
+  }
+  iteration.set(info.multipv, info);
+  const lines = Array.from({ length: pending.multipv }, (_, index) => iteration.get(index + 1));
+  if (lines.some(item => !item) || new Set(lines.map(item => item.pv[0])).size !== pending.multipv) return;
+  if (!pending.completed || info.depth >= pending.completed[0].depth) pending.completed = lines;
+}
+
+function finalResult(pending, engineBestmove) {
+  // A timed stop can choose a root move from an unfinished deeper iteration.
+  // Present the last complete candidate set as one consistent snapshot instead
+  // of pairing its score with that newer move. Preserve the raw UCI choice too.
+  let lines = pending.completed;
+  if (!lines) {
+    const line = pending.rootLines.get(engineBestmove);
+    if (!line) throw new Error('엔진 최선수와 일치하는 평가를 얻지 못했습니다. 다시 분석해 주세요.');
+    // No complete iteration is available: only this move's own evaluation is
+    // reliable. Other partial candidates must not imply a completed ranking.
+    lines = [{ ...line, multipv: 1 }];
+  }
+  const first = lines[0];
+  return { score: first.score, depth: first.depth, lines, bestmove: first.pv[0], engineBestmove, multipvComplete: Boolean(pending.completed) };
+}
 
 export class StockfishEngine {
   constructor(WorkerType = Worker, { engineId = 'lite', hash = 32, threads = 1, onLoad = () => {} } = {}) {
@@ -39,21 +72,32 @@ export class StockfishEngine {
     this.ready.catch(() => {});
   }
   send(command) { if (!this.closed) this.worker.postMessage(command); }
-  async analyze(chess, { depth = 16, movetime = 1200, multipv = 3, onInfo } = {}) {
+  async analyze(chess, { depth = 16, movetime = 1200, multipv = 3, searchMoves, onInfo } = {}) {
     const generation = this.searchGeneration;
     await this.ready;
     await this.idle;
     if (this.closed || generation !== this.searchGeneration) throw new DOMException('Cancelled', 'AbortError');
     if (this.pending) throw new Error('An engine search is already running.');
+    if (!Number.isInteger(multipv) || multipv < 1) throw new Error('후보 수는 1 이상의 정수여야 합니다.');
+    const legalMoves = new Set(chess.moves({ verbose: true }).map(uciMove));
+    let roots;
+    if (searchMoves !== undefined) {
+      if (!Array.isArray(searchMoves) || !searchMoves.length || searchMoves.some(move => typeof move !== 'string' || !legalMoves.has(move))) {
+        throw new Error('제한 분석에는 현재 국면의 합법적인 UCI 수가 필요합니다.');
+      }
+      roots = [...new Set(searchMoves)];
+    }
     const terminal = terminalResult(chess);
     if (terminal) return terminal;
+    const rootMoves = roots ? new Set(roots) : legalMoves;
+    const candidateCount = Math.min(multipv, rootMoves.size);
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => this.fail(new Error('분석 시간이 초과되었습니다. 다시 시도해 주세요.')), movetime + 15000);
       this.idle = new Promise(done => { this.resolveIdle = done; });
-      this.pending = { resolve, reject, timer, turn: chess.turn(), lines: new Map(), onInfo, cancelled: false };
-      this.send(`setoption name MultiPV value ${multipv}`);
+      this.pending = { resolve, reject, timer, turn: chess.turn(), rootMoves, multipv: candidateCount, iterations: new Map(), rootLines: new Map(), completed: null, onInfo, cancelled: false };
+      this.send(`setoption name MultiPV value ${candidateCount}`);
       this.send(positionCommand(chess));
-      this.send(`go depth ${depth} movetime ${movetime}`);
+      this.send(`go depth ${depth} movetime ${movetime}${roots ? ` searchmoves ${roots.join(' ')}` : ''}`);
     });
   }
   handleLine(line) {
@@ -61,7 +105,7 @@ export class StockfishEngine {
     if (!pending) return;
     const info = parseInfo(line, pending.turn);
     if (info && !pending.cancelled) {
-      pending.lines.set(info.multipv, info);
+      recordIteration(pending, info);
       pending.onInfo?.(info);
     }
     if (line.startsWith('bestmove ')) {
@@ -70,10 +114,8 @@ export class StockfishEngine {
       this.resolveIdle?.();
       this.resolveIdle = null;
       if (pending.cancelled) return;
-      const lines = [...pending.lines.values()].sort((a, b) => a.multipv - b.multipv);
-      const first = lines.find(item => item.multipv === 1);
-      if (!first) { pending.reject(new Error('엔진 평가를 얻지 못했습니다. 다시 분석해 주세요.')); return; }
-      pending.resolve({ score: first.score, depth: first.depth, lines, bestmove: line.split(' ')[1] });
+      try { pending.resolve(finalResult(pending, line.trim().split(/\s+/)[1])); }
+      catch (error) { pending.reject(error); }
     }
   }
   cancel() {
