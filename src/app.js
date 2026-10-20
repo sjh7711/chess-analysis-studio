@@ -362,7 +362,7 @@ function renderCoach() {
   const move=state.line ? state.line.steps[cursor-1] : state.game.moves[cursor-1];
   const results=state.line ? state.line.results : state.results;
   const moves=state.line ? state.line.steps : state.game.moves;
-  const context=gradeContext(results,moves,cursor);
+  const context={...gradeContext(results,moves,cursor),...(!state.line?{game:state.game,index:cursor}:{})};
   const before=results.get(cursor-1), after=hasMoveReview(before,results.get(cursor),move) ? results.get(cursor) : null, previous=context.previous;
   let comment;
   if (state.editor) comment={grade:null,text:'기물 배치를 적용하면 이 국면에서 둘 수 있는 수를 분석합니다.'};
@@ -520,7 +520,7 @@ function renderInsight() {
     } else message += ` · ${escape(grade.reason || '국면의 평가를 잘 유지했습니다.')}`;
   } else if (state.mode === 'full') message = '앞뒤 국면을 모두 분석하면 이 수의 평가가 표시됩니다.';
   else if (move) message = `<strong>${escape(moveLabel(move))}</strong> · 전체 대국을 분석하면 수의 분류를 확인할 수 있어요.`;
-  const insight = !state.editor && !state.line && grade && explainMove(move,before,after,gradeContext(state.results,state.game.moves,state.index));
+  const insight = !state.editor && !state.line && grade && explainMove(move,before,after,{...gradeContext(state.results,state.game.moves,state.index),game:state.game,index:state.index});
   if (insight) {
     insightContext = { game:state.game,index:state.index,insight,before,after };
     renderInsightDetail(insightContext);
@@ -552,7 +552,7 @@ function renderInsightDetail({game,index,insight,before,after}) {
     const coreLabel=kind==='sacrifice'?'희생 수락 예시':kind==='response'?'상대 응수':'최선의 수';
     return `<section class="insight-line${selected ? ' selected-line' : ''}"><h3>${title}${selected ? `<span class="insight-selected">${full?'전체 수순 탐색':'핵심 장면 탐색'}</span>` : ''}</h3><p>${escape(fact || '저장된 분석에 탐색 가능한 수순이 없습니다. 이 국면을 다시 분석해 주세요.')}</p>${line.moves.length ? `<div class="insight-actions"><button class="button outline" data-insight-play="${kind}" data-insight-scope="core" aria-pressed="${selected&&!full}">${coreLabel} 보기 · ${line.focus.length}번 이동</button>${line.moves.length>line.focus.length?`<button class="text-button insight-full" data-insight-play="${kind}" data-insight-scope="full" aria-pressed="${full}">전체 예상 수순 보기 · ${line.moves.length}번 이동</button>`:''}</div>${line.focus.note?`<p class="insight-note">${escape(line.focus.note)}</p>`:''}${kind==='response'&&insight.riskFact?`<p class="insight-risk">장기 예상: ${escape(insight.riskFact)}</p>`:''}` : ''}</section>`;
   };
-  setInsightContent(`${insight.kind==='move'?`<p class="insight-purpose">${escape(insight.summary || insight.reason)}</p>`:''}${insight.sacrifice?section('sacrifice','상대가 희생을 받아들이면',insight.sacrifice,insight.sacrificeFact):''}${section('response',insight.grade.severity>=1?'상대가 이용하는 수':'상대의 최선 응수',insight.response,insight.responseFact)}${insight.grade.severity>=1?section('alternative','대신 둘 수 있었던 수',insight.alternative,insight.alternativeFact):''}${insight.reason && insight.kind!=='move' ? `<details class="insight-more"><summary>상세 설명</summary><p>${escape(insight.reason)}</p></details>` : ''}`);
+  setInsightContent(`${insight.kind==='move'?`<p class="insight-purpose">${escape(insight.summary || insight.reason)}</p>`:''}${insight.sacrifice?section('sacrifice','상대가 희생을 받아들이면',insight.sacrifice,insight.sacrificeFact):''}${section('response',insight.grade.severity>=1?'상대가 이용하는 수':'상대의 최선 응수',insight.response,insight.responseFact)}${insight.grade.severity>=1?section('alternative','대신 둘 수 있었던 수',insight.alternative,insight.alternativeFact):''}${insight.reason && insight.kind!=='move' ? `<details class="insight-more"><summary>원래 리뷰의 판정 근거</summary><p>${escape(insight.reason)}</p></details>` : ''}`);
 }
 
 function startInsight(kind,scope='core') {

@@ -76,15 +76,15 @@ test('loss explanations identify verified tactical causes rather than just namin
     {fen:'k7/8/2b5/3N4/4P3/8/8/4K3 w - - 0 10',move:'Nb4',pv:['c6e4'],cause:/비숍의 공격길이 열려.*e4의 백 폰을 잡/},
     {fen:'k7/8/8/5n2/8/8/2R1K3/7R w - - 0 10',move:'Rg1',pv:['f5d4','e2f2','d4c2'],cause:/나이트의 동시 공격.*c2의 백 룩을 잡/},
     {fen:'k1r5/8/8/8/8/8/6Q1/4K3 w - - 0 10',move:'Qg1',pv:['c8c1','e1f2','c1g1','f2g1'],cause:/체크에 대응하는 사이.*g1의 백 퀸을 잡/},
-    {fen:'k3r3/8/5b2/8/8/2P5/4N3/4K2R w - - 0 10',move:'Rg1',pv:['f6c3','e1f1'],cause:/폰을 지키는 나이트가 왕을 보호하느라 되잡을 수 없어.*c3의 백 폰을 잡/},
+    {fen:'k3r3/8/5b2/8/8/2P5/4N3/4K2R w - - 0 10',move:'Rg1',pv:['f6c3','e1f1'],existing:true,cause:/이미 c3의 폰이 공격받고 있었지만 나이트가 왕을 보호하느라 되잡을 수 없어.*c3의 백 폰을 잡/},
     {fen:'k7/8/8/8/3p4/8/4P3/7K w - - 0 10',move:'e4',pv:['d4e3'],cause:/앙파상을 허용해.*e4의 백 폰을 잡/},
   ];
-  for (const {fen,move:san,pv,cause} of cases) {
+  for (const {fen,move:san,pv,cause,existing} of cases) {
     const chess=new Chess(fen),move=chess.move(san);
     for (const uci of pv) assert.ok(chess.move(uci),'fixture continuation must be legal');
     const description=describeMove(move,cp(0),cp(-300,pv));
     assert.equal(description.grade.key,'blunder');
-    assert.match(description.text,/^이 수로 인해/);
+    assert.match(description.text,existing?/^이미/:/^이 수로 인해/);
     assert.match(description.text,cause,san);
     assert.doesNotMatch(description.text,/예상 응수가 이어지면|undefined|NaN/);
   }
@@ -219,8 +219,8 @@ test('a verified acceptance example has its own score, a short core, and no effe
   const {move,before,after}=context,insight=explainMove(move,before,after);
   assert.equal(insight.grade.key,'brilliant');
   assert.deepEqual(insight.response.pv,['a7b6']);
-  assert.match(insight.sacrificeFact,/이 예시에서는/);
-  assert.match(insight.sacrificeFact,/체크하면서 e7의 퀸·d8의 룩도 겨냥/);
+  assert.match(insight.sacrificeFact,/상대가 e7의 룩을 퀸으로 잡으면/);
+  assert.match(insight.sacrificeFact,/c6의 나이트로 체크한 뒤/);
   assert.match(insight.sacrificeFact,/e7의 흑 퀸을 잡습니다/);
   const core=createInsightLine({...context,insight},'sacrifice');
   const full=createInsightLine({...context,insight},'sacrifice','full');
@@ -327,9 +327,9 @@ test('a rook offer is not explained as compensated by its first small pawn captu
   assert.equal(insight.sacrifice.focus.payoff,null,'the pawn and knight do not fully recover the rook within this core');
   assert.equal(core.steps.length,6);
   assert.equal(full.steps.length,22);
-  assert.match(insight.sacrificeFact,/기물을 바로 되찾기보다 비숍의 체크로 상대 왕을 압박/);
+  assert.match(insight.sacrificeFact,/상대가 f8의 룩을 나이트로 잡으면.*비숍이 h2의 백 폰을 잡고 상대 왕을 체크/);
   assert.match(insight.sacrificeFact,/이 응수에는 흑이 11수 안에 체크메이트할 것으로 분석/);
-  assert.match(insight.sacrificeFact,/핵심 장면 뒤에도 공격이 이어지는 예상 수순/);
+  assert.match(insight.sacrificeFact,/핵심 장면 뒤에도 이어지는 예상 수순/);
   assert.doesNotMatch(insight.sacrificeFact,/룩을 되찾|기물을 모두 회수|폰으로 보상|중앙 공격|갬빗/);
   assert.equal(core.seek(6).isCheckmate(),false);
   assert.equal(full.seek(22).isCheckmate(),true);
@@ -340,9 +340,9 @@ test('an attacking example with only a centipawn score does not invent a forced 
   const context=attackingSacrificeFixture({type:'cp',value:-50});
   const insight=explainMove(context.move,context.before,context.after);
   assert.equal(insight.sacrifice.focus.length,6);
-  assert.match(insight.sacrificeFact,/이 응수 뒤의 평가는 \+0\.50 \(흑 기준\)로 조금 유리/);
-  assert.match(insight.sacrificeFact,/기물 회수 외의 보상도 반영한 예상/);
-  assert.doesNotMatch(insight.sacrificeFact,/체크메이트|기물을 모두 되찾|강제로/);
+  assert.equal(insight.sacrifice.score.value,-50);
+  assert.match(insight.sacrificeFact,/내준 기물을 모두 되찾는 결과는 이 장면에서 아직 확인되지/);
+  assert.doesNotMatch(insight.sacrificeFact,/체크메이트|기물을 모두 되찾습니다|강제로/);
 });
 
 function deeperExplanation(context,kind,pv,score={type:'cp',value:100},depth=20) {
@@ -359,11 +359,13 @@ test('deeper acceptance explanations replace stale mate claims without changing 
   const refined=refineInsight({...context,insight},'sacrifice',result);
   assert.ok(refined);
   assert.equal(refined.grade,insight.grade);
-  assert.equal(refined.summary,insight.summary);
+  assert.equal(refined.summary,refined.sacrificeFact,'the caption updates with its selected branch while the board and original evaluation stay unchanged');
+  assert.notEqual(refined.summary,insight.summary);
   assert.equal(refined.evaluation,insight.evaluation);
   assert.equal(refined.response,insight.response);
   assert.equal(refined.alternative,insight.alternative);
-  assert.match(refined.sacrificeFact,/\+10\.34 \(흑 기준\)로 유리/);
+  assert.equal(refined.sacrifice.score.value,-1034);
+  assert.match(refined.sacrificeFact,/내준 기물을 모두 되찾는 결과는 이 장면에서 아직 확인되지/);
   assert.doesNotMatch(refined.sacrificeFact,/11수|체크메이트/);
   assert.equal(insightIdentity({...context,insight:refined},'sacrifice'),identity,'cache identity never incorporates a refined result');
   const line=createInsightLine({...context,insight:refined},'sacrifice');
@@ -387,7 +389,7 @@ test('refinement updates only its selected legal continuation and uses the actua
   assert.equal(refined.summary,insight.summary);
   assert.equal(refined.sacrifice,insight.sacrifice);
   assert.equal(refined.alternative,insight.alternative);
-  assert.match(refined.responseFact,/흑 퀸이 e7의 백 룩을 잡을 수/);
+  assert.match(refined.responseFact,/상대가 e7의 룩을 퀸으로 잡으면.*e7의 흑 퀸을 잡습니다/);
   const line=createInsightLine({...context,insight:refined},'response','full');
   assert.equal(line.sourceDepth,16);
   assert.equal(line.sourceScore.value,200);

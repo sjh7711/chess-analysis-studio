@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Chess, parseGame, uciMove } from '../src/chess-core.js';
-import { createInsightLine, explainMistake } from '../src/insight.js';
+import { createInsightLine, explainMistake, explainMove, insightIdentity, refineInsight } from '../src/insight.js';
 import { SAMPLE_PGN } from '../src/sample.js';
 
 const result = (score,pv=[]) => ({score,depth:16,bestmove:pv[0],lines:pv.length?[{pv,score,depth:16,multipv:1}]:[]});
@@ -13,7 +13,7 @@ test('explains mate in one from the supplied game and offers a legal alternative
   const explanation=explainMistake(move,cp(0,['d1g1']),mate(-1,'b',['f2e1']));
   assert.equal(explanation.grade.key,'blunder');
   assert.match(explanation.summary,/흑 퀸이 f2에서 e1로 이동해 상대 왕을 체크메이트할 수 있습니다/);
-  assert.match(explanation.summary,/대신 백 퀸이 d1에서 g1로 이동했어야 합니다/);
+  assert.match(explanation.summary,/대신 백 퀸을 d1에서 g1로 옮겨.*지킬 수 있었습니다/);
   assert.match(explanation.responseFact,/흑 퀸이 f2에서 e1로 이동해 상대 왕을 체크메이트/);
   assert.deepEqual(explanation.response.pv,['f2e1']);
   assert.deepEqual(explanation.alternative.pv,['d1g1']);
@@ -83,7 +83,10 @@ test('Rd8 explanation pairs the capture with check and a specific alternative wi
   const explanation=explainMistake(move,cp(-1579,['f4f3']),cp(-672,['e5e6']));
   assert.equal(explanation.lossText,'흑의 평가 손실 9.07');
   assert.equal(explanation.reason,'');
-  assert.equal(explanation.summary,'바로 다음 수에 백 퀸이 e6의 흑 폰을 잡고 상대 왕을 체크할 수 있습니다. 대신 흑 폰이 f4에서 f3로 이동했어야 합니다.');
+  assert.match(explanation.summary,/g2의 폰을 공격할 기회를 놓쳤습니다/);
+  assert.match(explanation.summary,/백 퀸이 e6의 흑 폰을 잡고 상대 왕을 체크/);
+  assert.match(explanation.summary,/대신 흑 폰을 f4에서 f3로 옮겨 g2의 폰을 공격/);
+  assert.match(explanation.summary,/후속 응수가 부족해 교환의 최종 결과는 아직 확인되지/);
   assert.doesNotMatch(explanation.summary,/9\.07|최선의 수보다|국면 평가/);
 });
 
@@ -126,4 +129,28 @@ test('a white mistake also starts the opponent response after the mistake and th
   assert.equal(alternative.position().isCheckmate(),false);
   assert.equal(response.reviewKind,'response');
   assert.equal(alternative.reviewKind,'alternative');
+});
+
+test('a deeper response that restores a verified mate replaces the old missed-mate caption without regrading the game',()=>{
+  const chess=new Chess('7k/8/5KQ1/8/8/8/8/8 w - - 0 1'),move=chess.move('Qg4');
+  const game={startFen:move.before,moves:[move],positions:[move.before,move.after],headers:{}},index=1;
+  const before=mate(1,'w',['g6g7']),after=cp(0,['h8h7']),context={game,index,before,after};
+  const insight=explainMove(move,before,after),original=JSON.stringify(context);
+  assert.match(insight.summary,/체크메이트 기회를 놓쳤습니다/);
+  const current=createInsightLine({...context,insight},'response');current.seek(1);
+  const displayed=current.position().fen(),cursor=current.cursor,score={type:'mate',value:1,winner:'w'},pv=['h8h7','g4g7'];
+  const result={score,depth:18,bestmove:pv[0],multipvComplete:true,lines:[{multipv:1,depth:18,score,pv}],
+    explanationIdentity:insightIdentity(context,'response'),searchGoal:{depth:18,movetime:1000,multipv:1,restrictedMoves:[]}};
+  const refined=refineInsight({...context,insight},'response',result);
+  assert.ok(refined);
+  assert.match(refined.summary,/g7에서 체크메이트합니다/);
+  assert.match(refined.responseFact,/g7에서 체크메이트합니다/);
+  assert.doesNotMatch(refined.summary,/체크메이트 기회를 놓쳤습니다/);
+  assert.equal(refined.grade,insight.grade);
+  assert.equal(refined.evaluation,insight.evaluation);
+  assert.equal(JSON.stringify(context),original);
+  assert.equal(current.position().fen(),displayed);
+  assert.equal(current.cursor,cursor);
+  assert.equal(after.score.type,'cp');
+  assert.deepEqual(refined.response.score,score);
 });
