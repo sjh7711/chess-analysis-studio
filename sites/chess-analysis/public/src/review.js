@@ -1,10 +1,71 @@
-import { hasMoveReview, scoreValue, uciMove } from './chess-core.js';
+import { Chess, expectedPoints, hasMoveReview, sacrificeCandidates, scoreValue, uciMove } from './chess-core.js';
+import { isBookMove } from './opening-book.js';
+
+function legalBranch(fen,line,captures) {
+  if (!line?.pv?.length || !captures.includes(line.pv[0]) || !['cp','mate'].includes(line.score?.type)
+    || !Number.isFinite(line.score.value) || !Number.isInteger(line.depth) || line.depth<1) return false;
+  try {
+    const chess=new Chess(fen);
+    for (const move of line.pv) chess.move(move);
+    return true;
+  } catch { return false; }
+}
+
+function sameSacrificeBinding(review,before,move,depth) {
+  return review?.version===1 && review.fen===move.after && review.rootFen===move.before
+    && review.uci===uciMove(move) && review.configKey===before.configKey && review.requestedDepth===depth
+    && ['verified','unverified','no-candidates','not-eligible'].includes(review.status);
+}
+
+async function reviewSacrifice(engine,chess,before,after,move,options) {
+  const requestedDepth=Math.min(16,Math.max(1,(Number.isInteger(before.depth)?before.depth:1)-1));
+  if (sameSacrificeBinding(after.moveReview.sacrificeReview,before,move,requestedDepth)) return after;
+  const evidence={version:1,fen:move.after,rootFen:move.before,uci:uciMove(move),configKey:before.configKey,
+    requestedDepth,restrictedMoves:[],branches:[],status:'not-eligible'};
+  const primary=after.moveReview.score;
+  const nearBest=Math.max(0,expectedPoints(before.score,move.color)-expectedPoints(primary,move.color))<0.02;
+  if (!after.terminal && Number.isInteger(before.depth) && before.depth>0 && nearBest
+    && scoreValue(before.score,move.color)>=0 && scoreValue(primary,move.color)>=0 && !isBookMove(move)) {
+    const captures=[...new Set(sacrificeCandidates(move).flatMap(offer=>offer.captures))].sort();
+    evidence.restrictedMoves=captures;
+    evidence.status=captures.length?'unverified':'no-candidates';
+    if (captures.length) {
+      // Keep the game's repetition history for engine evaluation. A fresh FEN
+      // alone would incorrectly discard claims after the offered capture.
+      const history=chess.history({verbose:true});
+      const position=new Chess(history[0]?.before||chess.fen());
+      for (const step of history) position.move(uciMove(step));
+      position.move(uciMove(move));
+      if (position.fen()===move.after) {
+        let source='candidate',complete=Boolean(after.multipvComplete);
+        let line=complete ? after.lines?.find(item=>item.depth===after.depth
+          && (item.multipv===1 || captures.length===1) && legalBranch(move.after,item,captures)) : null;
+        if (!line && engine?.analyze) {
+          source='search';
+          const movetime=Math.min(500,Number.isFinite(options.movetime)&&options.movetime>0?options.movetime:500);
+          const result=await engine.analyze(position,{...options,depth:requestedDepth,movetime,multipv:1,searchMoves:captures});
+          complete=Boolean(result.multipvComplete);
+          line=result.lines?.find(item=>item.pv?.[0]===result.bestmove && item.depth===result.depth
+            && legalBranch(move.after,item,captures));
+        }
+        if (line) {
+          const verified=complete && line.depth>=requestedDepth;
+          evidence.branches=[{capture:line.pv[0],score:{...line.score},depth:line.depth,pv:[...line.pv],multipvComplete:complete,
+            verified,status:verified?'verified':'depth-limited',source,bestResponse:false}];
+          evidence.status=verified?'verified':'unverified';
+        }
+      }
+    }
+  }
+  return {...after,moveReview:{...after.moveReview,sacrificeReview:evidence}};
+}
 
 // Grade the played move from the same root as the engine's best move. Scores
 // from independently searched child positions are kept for the graph only.
 export async function reviewMove(engine, chess, before, after, move, options = {}) {
-  if (!move || !before || hasMoveReview(before,after,move)) return after;
+  if (!move || !before) return after;
   if (chess.fen()!==move.before) throw new Error('수 평가의 시작 국면이 일치하지 않습니다.');
+  if (hasMoveReview(before,after,move)) return reviewSacrifice(engine,chess,before,after,move,options);
   const uci=uciMove(move);
   let candidate,source;
   if (after.terminal) {
@@ -31,7 +92,8 @@ export async function reviewMove(engine, chess, before, after, move, options = {
       source='search';
     }
   }
-  return {...after,moveReview:{version:1,fen:move.before,uci,configKey:before.configKey,
+  const reviewed={...after,moveReview:{version:1,fen:move.before,uci,configKey:before.configKey,
     beforeScore:before.score,beforeDepth:before.depth,beforeBestmove:before.bestmove,
     score:candidate.score,depth:candidate.depth,pv:[...candidate.pv],source}};
+  return reviewSacrifice(engine,chess,before,reviewed,move,options);
 }

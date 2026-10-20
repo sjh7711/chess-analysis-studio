@@ -6,7 +6,7 @@ import { pieceSvg, pieceSnapshot, pieceTransitions, StepNavigation, capturedPiec
 import { BoardAnnotations } from './annotations.js';
 import { SAMPLE_PGN } from './sample.js';
 import { AnalysisLine, PlaybackClock, PIECE_NAMES, cloneChess, editedPosition, materialBalance, exportLine, restoreResults, moveText } from './study.js';
-import { createInsightLine, describeMove, explainMistake, moveLabel, moveTurn } from './insight.js';
+import { createInsightLine, describeMove, explainMove, moveLabel, moveTurn } from './insight.js';
 import { completionAlerts } from './notification-center.js';
 import { MoveSounds } from './move-sounds.js';
 
@@ -16,7 +16,7 @@ const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&':'&am
 const STORAGE = 'chessreview.v1';
 const LIBRARY = 'chessreview.library.v1';
 let removedGame = null, exportFilename = 'chess-review.pgn', insightContext = null, insightMarkup = '', recommendationMarkup = '';
-let coachCache=null;
+let coachCache=null, coachExpanded=null;
 let moveListScroll=0, restoreMoveListScroll=false;
 let renderedBoard=null, renderedFlipped=false, editorPieceId=0;
 const pieceMotions=new Map();
@@ -300,6 +300,32 @@ function renderArrow() {
 }
 
 function renderCoach() {
+  const explaining=state.line?.kind==='pv' && state.line.reviewIndex===insightContext?.index && state.game===insightContext?.game;
+  const expanded=!state.line && !state.editor && coachExpanded?.game===state.game && coachExpanded.index===state.index;
+  if (explaining || expanded) {
+    const {insight,game,index}=explaining?insightContext:coachExpanded;
+    const line=explaining?state.line:null, step=line?.steps[line.cursor-1];
+    $('coach-move').textContent=moveLabel(game.moves[index-1]);
+    $('coach-grade').textContent=insight.grade.label;
+    $('coach-symbol').textContent='';
+    $('coach-symbol').className='explanation';
+    $('coach-symbol').textContent='💡';
+    const conditional=line?.reviewKind==='sacrifice';
+    const fact=conditional?insight.sacrificeFact:line?.reviewKind==='alternative'?insight.alternativeFact:insight.responseFact;
+    $('coach-text').textContent=line ? [step?.explanation || insight.summary || insight.reason,conditional&&line.cursor===line.steps.length&&fact?`예시 요약: ${fact}`:''].filter(Boolean).join(' ') : insight.summary || insight.reason;
+    $('coach-explain').disabled=false;
+    $('coach-explain').setAttribute('aria-expanded','true');
+    $('coach-explain').setAttribute('aria-label','수 설명 닫기');
+    $('coach-explanation-controls').hidden=false;
+    $('coach-scene').textContent=line?`${conditional?'가정한 수락 분기':line.reviewKind==='alternative'?'대안 수순':'상대 응수'} · ${line.cursor} / ${line.steps.length}`:'수의 목적과 판정 이유';
+    $('coach-prev').hidden=$('coach-next').hidden=!line;
+    $('coach-prev').disabled=!line || line.cursor===0;
+    $('coach-next').disabled=!line || line.cursor===line.steps.length;
+    return;
+  }
+  $('coach-explanation-controls').hidden=true;
+  $('coach-explain').setAttribute('aria-expanded','false');
+  $('coach-explain').setAttribute('aria-label','이 수 설명');
   const cursor=state.line ? state.line.cursor : state.index;
   const move=state.line ? state.line.steps[cursor-1] : state.game.moves[cursor-1];
   const results=state.line ? state.line.results : state.results;
@@ -318,6 +344,7 @@ function renderCoach() {
   $('coach-symbol').textContent=comment.grade?.symbol || '♟';
   $('coach-symbol').className=comment.grade?.key || 'pending';
   $('coach-text').textContent=comment.text;
+  $('coach-explain').disabled=!!state.editor || !!state.line || !comment.grade;
 }
 
 function renderAnalysis() {
@@ -330,7 +357,7 @@ function renderAnalysis() {
   renderCoach();
   $('arrow-label').textContent=state.line?.kind==='pv'?'다음 재생 수 표시':'추천 수 표시';
   $('show-arrow').setAttribute('aria-label',$('arrow-label').textContent);
-  $('evaluation-basis').textContent = `평가 · ${evaluationSide()} 기준${busy?' · 분석 중':''}`;
+  $('evaluation-basis').textContent = `평가 · ${evaluationSide()} 기준${state.line?.conditional?' · 희생 수락 예시':''}${busy?' · 분석 중':''}`;
   $('rail-score').textContent = displayScore(result?.score);
   const rail = $('eval-fill').parentElement;
   rail.classList.toggle('flipped',state.flipped);
@@ -440,7 +467,7 @@ function renderInsight() {
     } else message += ` · ${escape(grade.reason || '국면의 평가를 잘 유지했습니다.')}`;
   } else if (state.mode === 'full') message = '앞뒤 국면을 모두 분석하면 이 수의 평가가 표시됩니다.';
   else if (move) message = `<strong>${escape(moveLabel(move))}</strong> · 전체 대국을 분석하면 수의 분류를 확인할 수 있어요.`;
-  const insight = !state.editor && !state.line && grade && explainMistake(move,before,after,gradeContext(state.results,state.game.moves,state.index));
+  const insight = !state.editor && !state.line && grade && explainMove(move,before,after,gradeContext(state.results,state.game.moves,state.index));
   if (insight) {
     insightContext = { game:state.game,index:state.index,insight,before,after };
     renderInsightDetail(insightContext);
@@ -464,30 +491,49 @@ function renderInsightDetail({game,index,insight,before,after}) {
   const move = game.moves[index-1];
   after=assessedMoveResult(before,after,move);
   $('insight-title').textContent = `${moveLabel(move)} · ${insight.grade.label}`;
-  $('insight-evaluation').textContent = `${insight.lossText} · 수 전 ${displayScore(before.score)} → 수 후 ${displayScore(after.score)} (${evaluationSide()} 기준)`;
+  $('insight-evaluation').textContent = `${insight.lossText?insight.lossText+' · ':''}수 전 ${displayScore(before.score)} → 수 후 ${displayScore(after.score)} (${evaluationSide()} 기준)`;
   $('insight-playback').textContent = state.line ? `${state.line.title} · ${state.line.cursor} / ${state.line.steps.length}` : '';
   const section = (kind,title,line,fact) => {
     const selected = state.line?.reviewIndex === index && state.line.reviewKind === kind;
     const full=selected && state.line.reviewScope==='full';
-    const coreLabel=kind==='response'?'상대 응수':'최선의 수';
+    const coreLabel=kind==='sacrifice'?'희생 수락 예시':kind==='response'?'상대 응수':'최선의 수';
     return `<section class="insight-line${selected ? ' selected-line' : ''}"><h3>${title}${selected ? `<span class="insight-selected">${full?'전체 수순 탐색':'핵심 장면 탐색'}</span>` : ''}</h3><p>${escape(fact || '저장된 분석에 탐색 가능한 수순이 없습니다. 이 국면을 다시 분석해 주세요.')}</p>${line.moves.length ? `<div class="insight-actions"><button class="button outline" data-insight-play="${kind}" data-insight-scope="core" aria-pressed="${selected&&!full}">${coreLabel} 보기 · ${line.focus.length}번 이동</button>${line.moves.length>line.focus.length?`<button class="text-button insight-full" data-insight-play="${kind}" data-insight-scope="full" aria-pressed="${full}">전체 예상 수순 보기 · ${line.moves.length}번 이동</button>`:''}</div>${line.focus.note?`<p class="insight-note">${escape(line.focus.note)}</p>`:''}${kind==='response'&&insight.riskFact?`<p class="insight-risk">장기 예상: ${escape(insight.riskFact)}</p>`:''}` : ''}</section>`;
   };
-  setInsightContent(`${section('response','상대가 이용하는 수',insight.response,insight.responseFact)}${section('alternative','대신 둘 수 있었던 수',insight.alternative,insight.alternativeFact)}${insight.reason ? `<details class="insight-more"><summary>상세 설명</summary><p>${escape(insight.reason)}</p></details>` : ''}`);
+  setInsightContent(`${insight.kind==='move'?`<p class="insight-purpose">${escape(insight.summary || insight.reason)}</p>`:''}${insight.sacrifice?section('sacrifice','상대가 희생을 받아들이면',insight.sacrifice,insight.sacrificeFact):''}${section('response',insight.grade.severity>=1?'상대가 이용하는 수':'상대의 최선 응수',insight.response,insight.responseFact)}${insight.grade.severity>=1?section('alternative','대신 둘 수 있었던 수',insight.alternative,insight.alternativeFact):''}${insight.reason && insight.kind!=='move' ? `<details class="insight-more"><summary>상세 설명</summary><p>${escape(insight.reason)}</p></details>` : ''}`);
 }
 
 function startInsight(kind,scope='core') {
-  if (!insightContext || state.game !== insightContext.game || !['response','alternative'].includes(kind)) return;
+  if (!insightContext || state.game !== insightContext.game || !['response','alternative','sacrifice'].includes(kind)) return;
   const line = createInsightLine(insightContext,kind,scope);
   if (!line) return;
   line.seek(1);
   pausePlayback(); stopJob();
+  coachExpanded=null;
   state.line = line; state.selected = null; state.tab = 'study';
   state.chartMode = 'line';
   renderAll(); scheduleAnalysis();
 }
 
+function closeCoachExplanation() {
+  const context=state.line?.reviewIndex!=null?insightContext:coachExpanded;
+  coachExpanded=null;
+  if (context?.game===state.game) navigate(context.index);
+  $('coach-explain').focus({preventScroll:true});
+}
+
+function openCoachExplanation() {
+  if ($('coach-explain').getAttribute('aria-expanded')==='true') { closeCoachExplanation(); return; }
+  renderInsight();
+  if (!insightContext || state.line || state.editor) return;
+  const {insight}=insightContext;
+  const kind=insight.sacrifice?.moves.length?'sacrifice':insight.response?.moves.length?'response':null;
+  if (kind) startInsight(kind);
+  else {coachExpanded=insightContext;renderCoach();}
+}
+
 function renderChart() {
   $('chart-line').disabled = !state.line;
+  $('chart-line').textContent = state.line?.conditional?'희생 수락 예시':'탐색 수순';
   if (!state.line) state.chartMode = 'game';
   for (const mode of ['game','line']) $('chart-'+mode).setAttribute('aria-pressed',String(state.chartMode === mode));
   const branch = state.chartMode === 'line' && state.line;
@@ -537,7 +583,7 @@ function renderReview() {
     if (grade) { counts[move.color][grade.key]++; reviewed++; if (grade.severity >= 2) critical.push({ index:i+1,move,...grade }); }
   });
   if (!reviewed) { $('review-content').innerHTML = '<div class="summary-empty">전체 대국 분석 후 수별 분류가 표시됩니다.</div>'; return; }
-  $('review-content').innerHTML = `<div class="summary-counts">${['w','b'].map(color => `<div class="summary-player"><h4>${color === 'w' ? '♔' : '♚'} ${escape(state.game.headers[color === 'w' ? 'White' : 'Black'] || (color === 'w' ? '백' : '흑'))}</h4>${Object.entries(MOVE_GRADES).map(([key,{label,symbol}]) => `<div class="summary-stat"><span><i class="grade-icon ${key}" aria-hidden="true">${symbol}</i>${label}</span><b>${counts[color][key]}</b></div>`).join('')}</div>`).join('')}</div><p class="review-explanation">${reviewed} / ${state.game.moves.length}번 이동 분류 완료 · ${[...state.results.values()].some(r=>r.overview)?'빠른 검토 포함':'정밀 검토'}</p><details class="grading-guide"><summary>수 분류 기준</summary><p>${GRADING_BASIS}</p><p>탁월수: 예상 응수에서 손해를 감수한 기물 희생으로 국면을 유지한 경우. 훌륭한 수: 같은 깊이의 다른 후보보다 예상 승점을 10%p 이상 지킨 최선의 수로, 단순 되잡기와 유일한 합법 수는 제외합니다. 놓친 기회: 상대의 뚜렷한 실수로 생긴 공격·방어 기회를 살리지 못한 경우. 이론: 공개 오프닝 목록과 일치한 첫 10수 안의 수입니다.</p><p>탁월수·훌륭한 수·놓친 기회의 세부 조건은 앱 자체 추정이며, Chess.com의 비공개 레이팅별 판정과 일치하지 않을 수 있습니다. 이론은 등록된 수순에 한하며 모든 오프닝을 포함하지는 않습니다.</p><p>최선수와 실전 수는 같은 출발 국면에서 비교합니다. 그래프 점수는 각 국면을 독립적으로 분석한 값입니다. 예상 승점은 두는 쪽의 폰 단위 평가를 1 ÷ (1 + exp(−평가 ÷ 2.5))로 환산합니다. 체크메이트는 0 또는 1로 계산합니다.</p><p><a href="https://support.chess.com/en/articles/8572705-how-are-moves-classified-what-is-a-blunder-or-brilliant-etc" target="_blank" rel="noopener noreferrer">Chess.com 공식 분류 설명</a> · <a href="https://github.com/lichess-org/chess-openings" target="_blank" rel="noopener noreferrer">오프닝 자료 · CC0</a></p></details>${critical.length ? '<h3>다시 살펴볼 수</h3>' : ''}${critical.sort((a,b) => b.pointsLoss-a.pointsLoss).slice(0,5).map(item => `<button class="critical-button" data-review-index="${item.index}"><span>${escape(item.move.before.split(' ')[5])}${item.move.color === 'w' ? '.' : '...'} ${escape(item.move.san)} <small>(${item.move.color === 'w' ? '백' : '흑'})</small></span><span>${item.label} ↗</span></button>`).join('')}`;
+  $('review-content').innerHTML = `<div class="summary-counts">${['w','b'].map(color => `<div class="summary-player"><h4>${color === 'w' ? '♔' : '♚'} ${escape(state.game.headers[color === 'w' ? 'White' : 'Black'] || (color === 'w' ? '백' : '흑'))}</h4>${Object.entries(MOVE_GRADES).map(([key,{label,symbol}]) => `<div class="summary-stat"><span><i class="grade-icon ${key}" aria-hidden="true">${symbol}</i>${label}</span><b>${counts[color][key]}</b></div>`).join('')}</div>`).join('')}</div><p class="review-explanation">${reviewed} / ${state.game.moves.length}번 이동 분류 완료 · ${[...state.results.values()].some(r=>r.overview)?'빠른 검토 포함':'정밀 검토'}</p><details class="grading-guide"><summary>수 분류 기준</summary><p>${GRADING_BASIS}</p><p>탁월수: 합법적인 교환에서 기물을 내줄 수 있지만 유리하거나 대등한 평가를 유지한 좋은 희생입니다. 다른 기물을 내주거나 이미 공격받던 기물을 계속 내주는 경우에는 수락 분기를 추가로 검증합니다. 희생 없는 대안으로 이미 쉽게 이기는 국면은 제외합니다. 훌륭한 수: 같은 깊이의 다른 후보보다 예상 승점을 10%p 이상 지킨 최선의 수로, 단순 되잡기와 유일한 합법 수는 제외합니다. 놓친 기회: 상대의 뚜렷한 실수로 생긴 공격·방어 기회를 살리지 못한 경우. 이론: 공개 오프닝 목록에 등록된 수순과 일치한 수입니다.</p><p>탁월수·훌륭한 수·놓친 기회의 세부 조건은 앱 자체 추정이며, Chess.com의 비공개 레이팅별 판정과 일치하지 않을 수 있습니다. 이론은 등록된 수순에 한하며 모든 오프닝을 포함하지는 않습니다.</p><p>최선수와 실전 수는 같은 출발 국면에서 비교합니다. 그래프 점수는 각 국면을 독립적으로 분석한 값입니다. 예상 승점은 두는 쪽의 폰 단위 평가를 1 ÷ (1 + exp(−평가 ÷ 2.5))로 환산합니다. 체크메이트는 0 또는 1로 계산합니다.</p><p><a href="https://support.chess.com/en/articles/8572705-how-are-moves-classified-what-is-a-blunder-or-brilliant-etc" target="_blank" rel="noopener noreferrer">Chess.com 공식 분류 설명</a> · <a href="https://github.com/lichess-org/chess-openings" target="_blank" rel="noopener noreferrer">오프닝 자료 · CC0</a></p></details>${critical.length ? '<h3>다시 살펴볼 수</h3>' : ''}${critical.sort((a,b) => b.pointsLoss-a.pointsLoss).slice(0,5).map(item => `<button class="critical-button" data-review-index="${item.index}"><span>${escape(item.move.before.split(' ')[5])}${item.move.color === 'w' ? '.' : '...'} ${escape(item.move.san)} <small>(${item.move.color === 'w' ? '백' : '흑'})</small></span><span>${item.label} ↗</span></button>`).join('')}`;
 }
 
 function renderResults() { renderAnalysis(); renderMoves(); renderChart(); renderReview(); renderStudy(); }
@@ -571,6 +617,7 @@ function stepBoard(direction, line=state.line) {
 
 function navigate(index,{analyze=true}={}) {
   if(state.editor){toast('배치를 적용하거나 취소한 뒤 이동하세요.');return;}
+  coachExpanded=null;
   const previous=state.line?null:state.index;
   pausePlayback();
   state.index = Math.max(0,Math.min(state.game.moves.length,index));
@@ -757,7 +804,7 @@ function renderStudy() {
     : state.mode || !isCached(currentResult()) ? '현재 국면 분석 중 · 자동으로 재생하지 않습니다.'
     : ended && line.steps.length ? line.reviewScope==='core' ? line.fullLength>line.steps.length ? '핵심 장면에서 멈췄습니다. 후속 수순은 아래의 전체 예상 수순을 선택하세요.' : '핵심 장면에서 멈췄습니다. 저장된 후속 수순은 없습니다.' : '선택한 수순의 끝입니다. 다시 재생하거나 원본으로 돌아갈 수 있습니다.'
     : line.steps.length ? '분석 완료 · 재생을 누르면 수순이 진행됩니다.' : '분석 완료 · 기물을 움직여 탐색하세요.';
-  const branchLabel = line.reviewKind ? `${line.reviewScope==='core'?'핵심 장면':'전체 예상 수순'} · ${line.reviewKind === 'response' ? '상대 응수' : '대안'} · ${moveTurn(line.steps[0])}부터` : line.kind==='pv' ? '추천 수 · 전체 예상 수순' : '탐색 범위';
+  const branchLabel = line.reviewKind ? `${line.reviewScope==='core'?'핵심 장면':'전체 예상 수순'} · ${line.reviewKind === 'sacrifice' ? '가정한 희생 수락' : line.reviewKind === 'response' ? '상대 응수' : '대안'} · ${moveTurn(line.steps[0])}부터` : line.kind==='pv' ? '추천 수 · 전체 예상 수순' : '탐색 범위';
   $('study-endpoint').textContent = line.steps.length ? `${branchLabel} · ${line.steps.length}번 이동 · ${moveTurn(line.steps.at(-1))}까지` : '';
   $('study-endpoint').hidden = !line.steps.length;
   $('study-first').disabled=$('study-prev').disabled=line.cursor===0;
@@ -850,6 +897,10 @@ $('move-list').addEventListener('scroll',rememberMoveListScroll,{passive:true});
 $('review-content').addEventListener('click', event => { const button = event.target.closest('[data-review-index]'); if (button) navigate(Number(button.dataset.reviewIndex)); });
 $('pv-lines').addEventListener('click', event => { const button = event.target.closest('[data-pv]'); if (button) startPv(Number(button.dataset.pv)); });
 $('insight-content').addEventListener('click',event=>{const button=event.target.closest('[data-insight-play]');if(button)startInsight(button.dataset.insightPlay,button.dataset.insightScope);});
+$('coach-explain').onclick=openCoachExplanation;
+$('coach-prev').onclick=()=>{if(state.line)seekLine(state.line.cursor-1);};
+$('coach-next').onclick=()=>{if(state.line)seekLine(state.line.cursor+1);};
+$('coach-done').onclick=closeCoachExplanation;
 $('study-review').onclick=()=>{const index=state.line?.reviewIndex;if(index!=null)navigate(index);};
 $('promotion-options').addEventListener('click', event => { const button = event.target.closest('[data-promote]'); if (button && pendingPromotion) { const { from,to } = pendingPromotion; pendingPromotion = null; $('promotion-dialog').close(); playMove(from+to+button.dataset.promote); } });
 $('promotion-cancel').onclick = () => { pendingPromotion = null; $('promotion-dialog').close(); };

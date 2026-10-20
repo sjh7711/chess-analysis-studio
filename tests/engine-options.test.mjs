@@ -18,7 +18,7 @@ test('performance controls map to search limits and distinguish cached evaluatio
   assert.equal(DEFAULT_PERFORMANCE.reviewMode,'precise');
   assert.equal(normalizePerformance().reviewMode,'precise');
   assert.equal(normalizePerformance({reviewMode:'fast'}).reviewMode,'fast');
-  assert.match(key,/^review-v3:position:/);
+  assert.match(key,/^review-v4:position:/);
 });
 
 test('whole-game review limits candidates while preserving explicit position analysis and review speed settings',()=>{
@@ -37,7 +37,7 @@ test('whole-game review limits candidates while preserving explicit position ana
 test('cache keys record the actual whole-game policy separately from manual candidate settings',()=>{
   const settings={...DEFAULT_PERFORMANCE,multipv:3};
   const position=analysisKey('full',16,settings),game=analysisKey('full',16,settings,'game');
-  assert.match(game,/^review-v3:game:full:16:1200:2:32:1$/);
+  assert.match(game,/^review-v4:game:full:16:1200:2:32:1$/);
   assert.notEqual(position,game);
   assert.equal(analysisKey('full',16,{...settings,multipv:5},'game'),game);
   assert.notEqual(analysisKey('full',16,{...settings,multipv:5}),position);

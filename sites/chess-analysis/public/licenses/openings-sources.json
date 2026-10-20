@@ -2,7 +2,7 @@
   "source": "https://github.com/lichess-org/chess-openings",
   "license": "CC0-1.0",
   "downloaded": "2026-10-04",
-  "maxPlies": 20,
+  "maxPlies": 36,
   "sources": [
     {
       "file": "a.tsv",

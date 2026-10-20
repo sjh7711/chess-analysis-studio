@@ -155,27 +155,142 @@ export function assessedMoveResult(before, after, move) {
   return {...after,score,depth:review.depth,bestmove:pv[0]||null,lines:pv.length?[{multipv:1,score,depth:review.depth,pv}]:[]};
 }
 const values = {p:1,n:3,b:3,r:5,q:9,k:0};
-function material(chess, color) {
-  return chess.board().flat().reduce((sum,p)=>sum+(p ? values[p.type]*(p.color===color ? 1 : -1) : 0),0);
+const capturedSquare=move=>move.flags.includes('e') ? move.to[0]+move.from[1] : move.to;
+const promotionGain=move=>move.promotion ? values[move.promotion]-values.p : 0;
+
+// Legal same-square exchanges, with either side free to stop exchanging. This
+// measures the initial material offered, not the eventual compensation in a PV.
+function exchangeGain(chess, square, memo) {
+  const victim=chess.get(square);
+  if (!victim || victim.color===chess.turn() || victim.type==='k') return 0;
+  const key=chess.fen()+'|'+square;
+  if (memo.has(key)) return memo.get(key);
+  let best=0;
+  for (const capture of chess.moves({verbose:true})) {
+    if (!capture.captured || capturedSquare(capture)!==square) continue;
+    chess.move(uciMove(capture));
+    const gain=values[capture.captured]+promotionGain(capture)-exchangeGain(chess,capture.to,memo);
+    chess.undo();
+    best=Math.max(best,gain);
+  }
+  memo.set(key,best);
+  return best;
 }
-function verifiedSacrifice(move, after) {
-  if (!move.before || !move.after || !['n','b','r','q'].includes(move.piece) || move.promotion) return false;
-  const pv = after.lines?.[0]?.pv;
-  if (!pv || pv.length<4) return false;
+
+const sacrificeCache=new WeakMap();
+export function sacrificeCandidates(move) {
+  if (!move?.before || !move.after) return [];
+  const signature=[move.before,move.after,move.from,move.to,move.color,move.piece,move.captured,move.promotion].join('|');
+  const cached=sacrificeCache.get(move);
+  if (cached?.signature===signature) return cached.candidates;
+  const candidates=[];
   try {
-    const original = new Chess(move.before), chess = new Chess(move.after);
-    // An already hanging piece or an ordinary equal trade is not a brilliant sacrifice.
-    if (original.isAttacked(move.from,move.color==='w'?'b':'w')) return false;
-    let first;
-    for (const uci of pv.slice(0,4)) {
-      const reply=chess.move(uci);
-      if (!first) {
-        first=reply;
-        if (reply.to!==move.to || reply.captured!==move.piece) return false;
-      }
+    const original=new Chess(move.before),after=new Chess(move.after),enemy=move.color==='w'?'b':'w';
+    const source=original.get(move.from),memo=new Map();
+    if (source?.color!==move.color || source.type!==move.piece || after.turn()!==enemy) return [];
+    const played=original.move(uciMove(move));
+    if (played.after!==move.after || (played.captured||null)!==(move.captured||null)) return [];
+    original.undo();
+    const captures=after.moves({verbose:true}).filter(reply=>reply.captured);
+    const moveGain=(values[move.captured]||0)+promotionGain(move);
+    const fen=move.before.split(' ');fen[1]=enemy;fen[3]='-';
+    const prior=new Chess(fen.join(' '));
+    for (const square of new Set(captures.map(capturedSquare))) {
+      const offered=after.get(square);
+      if (!offered || offered.color!==move.color || offered.type==='k') continue;
+      // Quiet pawn offers are common opening/positional play. Limit this
+      // special classification to a moved pawn with a forcing continuation.
+      if (offered.type==='p' && (square!==move.to || !after.isCheck() && !move.captured && !move.promotion)) continue;
+      const offeredLoss=exchangeGain(after,square,memo);
+      if (offeredLoss<=moveGain) continue;
+      const sourceSquare=square===move.to ? move.from : square;
+      const existingLoss=original.get(sourceSquare)?.color===move.color && original.isAttacked(sourceSquare,enemy)
+        ? exchangeGain(prior,sourceSquare,memo) : 0;
+      candidates.push({square,piece:offered.type,sourceSquare,cost:offeredLoss-moveGain,offeredLoss,existingLoss,moveGain,
+        captures:captures.filter(capture=>capturedSquare(capture)===square).map(uciMove)});
     }
-    return material(original,move.color)-material(chess,move.color)>=2;
+  } catch { /* Malformed positions cannot establish a sacrifice. */ }
+  sacrificeCache.set(move,{signature,candidates});
+  return candidates;
+}
+
+export function sacrificeEvidence(move) {
+  if (move?.piece==='k') return null;
+  const candidate=sacrificeCandidates(move).find(offer=>offer.square===move.to && offer.cost>offer.existingLoss);
+  return candidate ? {...candidate,cost:candidate.cost-candidate.existingLoss} : null;
+}
+
+// Other-piece offers and an already exposed piece need actual engine evidence
+// of compensation after the opponent accepts. Never replace the primary root
+// score with this illustrative, capture-restricted counterfactual branch.
+export function reviewedSacrificeEvidence(before, after, move) {
+  if (!hasMoveReview(before,after,move)) return null;
+  const review=after.moveReview.sacrificeReview;
+  if (review?.version!==1 || review.status!=='verified' || review.fen!==move.after || review.rootFen!==move.before
+    || review.uci!==uciMove(move) || review.configKey!==before.configKey
+    || !Number.isInteger(before.depth) || before.depth<1
+    || review.requestedDepth!==Math.min(16,Math.max(1,before.depth-1))
+    || !Array.isArray(review.branches) || review.branches.length!==1) return null;
+  const offers=sacrificeCandidates(move),captures=[...new Set(offers.flatMap(offer=>offer.captures))].sort();
+  const restricted=Array.isArray(review.restrictedMoves) ? [...new Set(review.restrictedMoves)].sort() : [];
+  if (!captures.length || captures.length!==restricted.length || captures.some((capture,index)=>capture!==restricted[index])) return null;
+  for (const branch of review.branches||[]) {
+    if (!branch.verified || branch.status!=='verified' || !branch.multipvComplete || !Number.isInteger(branch.depth)
+      || branch.depth<review.requestedDepth || !['cp','mate'].includes(branch.score?.type) || !Number.isFinite(branch.score.value)
+      || branch.score.type==='mate' && !['w','b'].includes(branch.score.winner)
+      || !Array.isArray(branch.pv) || branch.pv[0]!==branch.capture || !captures.includes(branch.capture)
+      || !['candidate','search'].includes(branch.source) || branch.bestResponse!==false
+      || expectedPoints(branch.score,move.color)<0.50) continue;
+    try {
+      const chess=new Chess(move.after);
+      for (const uci of branch.pv) chess.move(uci);
+      return {offer:offers.find(offer=>offer.captures.includes(branch.capture)),branch};
+    } catch { /* A partial/illegal PV cannot establish tactical compensation. */ }
+  }
+  return null;
+}
+
+function newSacrificeDecision(move, evidence, previousMove) {
+  const offer=evidence?.offer;
+  if (!offer) return false;
+  // Moving an exposed piece to a new square can renew the sacrifice. Leaving
+  // another piece en prise is a new decision only in response to a new attack.
+  if (offer.square===move.to && offer.sourceSquare===move.from) return true;
+  if (!previousMove || previousMove.color===move.color || previousMove.after!==move.before || offer.existingLoss<=0) return false;
+  try {
+    const prior=new Chess(previousMove.before),piece=prior.get(offer.square);
+    if (prior.turn()!==previousMove.color || piece?.color!==move.color || piece.type!==offer.piece
+      || prior.isAttacked(offer.square,previousMove.color)) return false;
+    const played=prior.move(uciMove(previousMove));
+    if (played.after!==move.before) return false;
+    return new Chess(move.before).isAttacked(offer.square,previousMove.color);
   } catch { return false; }
+}
+
+function alreadyWinningWithoutSacrifice(before, move) {
+  const fallback=()=>expectedPoints(before.score,move.color)>=0.90;
+  if (!before.multipvComplete || !Number.isFinite(before.depth) || before.depth<1 || !move.before) return fallback();
+  const first=before.lines?.find(line=>line.multipv===1 && line.pv?.[0]===before.bestmove && line.depth===before.depth);
+  if (!first || !sameScore(first.score,before.score)) return fallback();
+  let verified=0;
+  for (const line of before.lines) {
+    if (line.depth!==before.depth || !line.score || !line.pv?.[0] || line.pv[0]===uciMove(move)) continue;
+    try {
+      const chess=new Chess(move.before),alternative=chess.move(line.pv[0]);
+      verified++;
+      if (expectedPoints(line.score,move.color)>=0.90) {
+        const offers=sacrificeCandidates(alternative);
+        if (!offers.length) return true;
+        // A proven mate that only preserves an earlier offer is already a
+        // winning continuation; it does not demand a new sacrifice decision.
+        if (line.score.type==='mate' && offers.every(offer=>offer.cost<=offer.existingLoss)) return true;
+      }
+    } catch { /* An illegal/stale alternative cannot establish an easy win. */ }
+  }
+  // Completed alternatives can themselves require a sacrifice. Their scores
+  // do not prove a comfortable win without one. With no comparable candidate,
+  // retain the conservative root-score fallback rather than inventing a line.
+  return verified ? false : fallback();
 }
 
 function verifiedTopCandidate(before, move) {
@@ -232,8 +347,10 @@ export function classifyMove(before, after, move, {previous,previousMove,previou
   let reason='';
   const second=before.multipvComplete && Number.isFinite(before.depth) && before.depth>0
     ? before.lines?.find(line=>line.multipv===2 && line.score && line.pv?.[0] && line.pv[0]!==before.bestmove && line.depth===before.depth) : null;
-  if (pointsLoss<0.02 && afterPoints>=0.45 && beforePoints<0.90 && verifiedSacrifice(move,assessed)) {
-    key='brilliant'; reason='예상 응수에서 기물을 희생하면서도 국면을 유지하는 수입니다.';
+  if (pointsLoss<0.02 && afterPoints>=0.50 && !isBookMove(move)
+    && (sacrificeEvidence(move) || newSacrificeDecision(move,reviewedSacrificeEvidence(before,after,move),previousMove))
+    && !alreadyWinningWithoutSacrifice(before,move)) {
+    key='brilliant'; reason='기물을 내줄 수 있는 수지만, 최선의 응수에도 유리하거나 대등한 국면을 유지합니다.';
   } else if (best && second && afterPoints>=0.45 && beforePoints-expectedPoints(second.score,move.color)>=0.10
     && !directRecapture(move,previousMove) && !onlyLegalMove(move)) {
     key='great'; reason='다른 후보보다 예상 승점을 크게 지키는 결정적인 수입니다.';

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { Chess, parseGame, uciMove } from '../src/chess-core.js';
-import { describeMove } from '../src/insight.js';
+import { createInsightLine, describeMove, explainMove, explainMistake } from '../src/insight.js';
 import { SAMPLE_PGN } from '../src/sample.js';
 
 const game=parseGame(readFileSync(new URL('./fixtures/review-example.pgn',import.meta.url),'utf8'));
@@ -145,4 +145,182 @@ test('an immediate verified loss remains ahead of the same missed knight fork',(
   assert.match(description.text,/바로 다음 수에 흑 비숍이 f3의 백 나이트를 잡을 수/);
   assert.match(description.text,/대신 백 나이트를 f3에서 e5로/);
   assert.doesNotMatch(description.text,/기회를 놓쳤습니다/);
+});
+
+test('brilliant offers explain the current board purpose without inventing their acceptance',()=>{
+  const positions=[
+    {fen:'b2r3r/k4p1p/p2q1np1/Np1P4/3p1Q2/P4PPB/1PP4P/1K2R3 w - - 0 25',san:'Re7+',reply:'a7b6',purpose:/^백 룩이 e1에서 e7로 이동해 상대 왕을 체크합니다\./},
+    {fen:'3r3r/Rb3p1p/p4np1/1p1q4/kP6/P1Q2PPB/2P4P/1K6 w - - 2 30',san:'Rxb7',reply:'d5c4',purpose:/^백 룩이 b7의 흑 비숍을 잡습니다\./},
+    {fen:'3r3r/1R3p1p/Q5p1/1p6/1kq5/5PPB/2P4P/1K6 w - - 0 33',san:'c3+',reply:'b4b3',purpose:/^백 폰이 c2에서 c3로 이동해 상대 왕을 체크합니다\./},
+    {fen:'3r3r/1R3p1p/6p1/1p6/2q5/5PPB/1Q5P/1K1k4 w - - 4 36',san:'Bf1',reply:'d1e1',purpose:/^비숍을 h3에서 f1로 옮겨 c4의 퀸을 공격합니다\./},
+    {fen:'7r/1R3p1p/6p1/1p6/2q5/5PP1/1Q1r3P/1K1k1B2 w - - 6 37',san:'Rd7',reply:'d1e1',purpose:/^룩을 b7에서 d7로 옮겨 d2의 룩을 공격합니다\./},
+  ];
+  for (const {fen,san,reply,purpose} of positions) {
+    const chess=new Chess(fen),move=chess.move(san),response=chess.move(reply);
+    assert.equal(response.captured,undefined,'the supplied continuation declines the offer');
+    const description=describeMove(move,cp(0,[uciMove(move)]),cp(0,[reply]));
+    assert.equal(description.grade.key,'brilliant',san);
+    assert.match(description.text,purpose,san);
+    assert.match(description.text,/기물을 내줄 수 있는 수지만/);
+    assert.doesNotMatch(description.text,/기물을 희생하면서|흑 (?:퀸|룩|비숍|나이트|폰)[이가].*잡습니다|상대가.*잡습니다|강제로|반드시/);
+    assert.equal(description.text.split('.').filter(Boolean).length,2);
+  }
+});
+
+test('great moves lead with the verified tactic rather than the grading terminology',()=>{
+  const chess=new Chess('k7/8/2q5/8/4P1r1/5N2/8/4K3 w - - 0 15'),move=chess.move('Ne5');
+  const before={...cp(0,[uciMove(move)]),multipvComplete:true,lines:[
+    {multipv:1,depth:16,score:{type:'cp',value:0},pv:[uciMove(move)]},
+    {multipv:2,depth:16,score:{type:'cp',value:-200},pv:['e1f1']},
+  ]};
+  const description=describeMove(move,before,cp(0));
+  assert.equal(description.grade.key,'great');
+  assert.match(description.text,/^나이트를 f3에서 e5로 옮겨 c6의 퀸·g4의 룩을 동시에 공격합니다\./);
+  assert.match(description.text,/다른 후보보다 예상 승점을 크게 지키는/);
+  assert.doesNotMatch(description.text,/희생|기물을 내줄/);
+});
+
+function acceptedSacrificeFixture() {
+  const chess=new Chess('b2r3r/k4p1p/p2q1np1/Np1P4/3p1Q2/P4PPB/1PP4P/1K2R3 w - - 0 25');
+  const move=chess.move('Re7+'),uci=uciMove(move);
+  const branchChess=new Chess(move.after),pv=['Qxe7','Nc6+','Kb6','Nxe7','Rhg8','Ka2'].map(san=>uciMove(branchChess.move(san)));
+  const before={...cp(0,[uci,'a7b6']),configKey:'coach-acceptance'};
+  const after={...cp(-900,['a7b6']),moveReview:{version:1,fen:move.before,uci,configKey:before.configKey,
+    beforeScore:before.score,beforeDepth:before.depth,beforeBestmove:before.bestmove,
+    score:{type:'cp',value:0},depth:16,pv:[uci,'a7b6'],source:'best',sacrificeReview:{
+      version:1,status:'verified',fen:move.after,rootFen:move.before,uci,configKey:before.configKey,
+      requestedDepth:15,restrictedMoves:['d6e7'],branches:[{capture:'d6e7',score:{type:'cp',value:300},depth:15,pv,
+        multipvComplete:true,verified:true,status:'verified',source:'search',bestResponse:false}],
+    }}};
+  const game={startFen:move.before,moves:[move],positions:[move.before,move.after],headers:{}};
+  return {game,index:1,move,before,after};
+}
+
+test('the lightbulb explains a good quiet move and offers manual defence exploration without inventing a sacrifice',()=>{
+  const chess=new Chess('4k3/4p3/8/8/8/8/8/4K1N1 w - - 0 30'),move=chess.move('Nf3');
+  const game={startFen:move.before,moves:[move],positions:[move.before,move.after],headers:{}};
+  const before=cp(0,['e1f1']),after=cp(-30,['e7e5']),original=JSON.stringify(game);
+  const insight=explainMove(move,before,after);
+  assert.equal(insight.kind,'move');
+  assert.equal(insight.grade.key,'good');
+  assert.match(insight.moveFact,/백 나이트가 g1에서 f3로 이동/);
+  assert.match(insight.summary,/중앙의 d4·e5 칸을 제어/);
+  assert.match(insight.reason,/예상 승점의 감소를 작게/);
+  assert.equal(insight.sacrifice,null);
+  assert.equal(createInsightLine({game,index:1,insight,before,after},'sacrifice'),null);
+  const line=createInsightLine({game,index:1,insight,before,after},'response');
+  assert.equal(line.cursor,0);
+  assert.equal(line.base.fen(),move.after);
+  assert.match(line.steps[0].explanation,/흑 폰이 e7에서 e5로 이동/);
+  assert.doesNotMatch(line.steps[0].explanation,/세로로 2칸|이제 백 차례/);
+  assert.equal(JSON.stringify(game),original);
+});
+
+test('a verified acceptance example has its own score, a short core, and no effect on the actual game or best defence',()=>{
+  const context=acceptedSacrificeFixture(),original=JSON.stringify(context);
+  const {move,before,after}=context,insight=explainMove(move,before,after);
+  assert.equal(insight.grade.key,'brilliant');
+  assert.deepEqual(insight.response.pv,['a7b6']);
+  assert.match(insight.sacrificeFact,/이 예시에서는/);
+  assert.match(insight.sacrificeFact,/나이트.*상대 왕을 체크/);
+  assert.match(insight.sacrificeFact,/e7의 흑 퀸을 잡습니다/);
+  const core=createInsightLine({...context,insight},'sacrifice');
+  const full=createInsightLine({...context,insight},'sacrifice','full');
+  const defence=createInsightLine({...context,insight},'response');
+  assert.deepEqual(core.steps.map(step=>step.san),['Qxe7','Nc6+','Kb6','Nxe7']);
+  assert.equal(full.steps.length,6);
+  assert.equal(core.fullLength,6);
+  assert.equal(core.cursor,0);
+  assert.equal(core.base.fen(),move.after);
+  assert.equal(core.sourceScore.value,300);
+  assert.equal(core.results.get(0).score.value,300);
+  assert.equal(core.sourceDepth,15);
+  assert.equal(defence.results.get(0).score.value,0);
+  assert.equal(after.score.value,-900);
+  assert.equal(core.conditional,true);
+  assert.equal(core.bestResponse,false);
+  assert.match(core.title,/상대가 희생을 받아들이면/);
+  assert.match(core.startLabel,/희생 수락을 가정한 예시/);
+  assert.match(core.focusNote,/최선의 방어 수순과 다르며/);
+  assert.match(core.steps[1].explanation,/킹·e7의 퀸을 동시에 공격/);
+  assert.doesNotMatch(core.steps[1].explanation,/L자로|이제 흑 차례/);
+  assert.equal(core.seek(4).get('e7').type,'n');
+  assert.equal(defence.cursor,0);
+  assert.equal(JSON.stringify(context),original);
+});
+
+test('the lightbulb revalidates stale, shallow, unrelated and illegal acceptance branches before exposing them',()=>{
+  const base=acceptedSacrificeFixture(),insight=explainMove(base.move,base.before,base.after);
+  const mutations=[
+    f=>{f.before.configKey='changed';},
+    f=>{f.before.depth=17;},
+    f=>{f.after.moveReview.sacrificeReview.rootFen=f.move.after;},
+    f=>{f.after.moveReview.sacrificeReview.fen=f.move.before;},
+    f=>{f.after.moveReview.sacrificeReview.uci='e1e6';},
+    f=>{f.after.moveReview.sacrificeReview.status='depth-limited';},
+    f=>{f.after.moveReview.sacrificeReview.restrictedMoves=['a7b6'];},
+    f=>{f.after.moveReview.sacrificeReview.branches[0].verified=false;},
+    f=>{f.after.moveReview.sacrificeReview.branches[0].multipvComplete=false;},
+    f=>{f.after.moveReview.sacrificeReview.branches[0].depth=14;},
+    f=>{f.after.moveReview.sacrificeReview.branches[0].score.value=-100;},
+    f=>{f.after.moveReview.sacrificeReview.branches[0].pv.push('a8h1');},
+    f=>{f.after.moveReview.sacrificeReview.branches[0].pv=['d6e7'];},
+  ];
+  for(const mutate of mutations) {
+    const context=structuredClone(base);mutate(context);
+    assert.equal(explainMove(context.move,context.before,context.after).sacrifice,null);
+    assert.equal(createInsightLine({...context,insight},'sacrifice'),null,'an old displayed explanation cannot bypass current source validation');
+  }
+});
+
+test('the unified lightbulb preserves mistake explanations and requires completed analysis for every grade',()=>{
+  const move=at(17,'b'),before=cp(-50,['d5c5']),after=cp(143,['f3e4']);
+  const original=explainMistake(move,before,after),unified=explainMove(move,before,after);
+  assert.equal(unified.kind,'mistake');
+  for(const key of ['grade','reason','summary','response','alternative','basis']) assert.deepEqual(unified[key],original[key]);
+  assert.equal(unified.sacrifice,null);
+  assert.equal(explainMove(move,null,after),null);
+  assert.equal(explainMove(move,before,null),null);
+  assert.equal(explainMove(null,before,after),null);
+});
+
+function attackingSacrificeFixture(score={type:'mate',value:-11,winner:'b'}) {
+  const chess=new Chess('2rq1rk1/pb1n1ppN/3bpn2/1pp5/3P4/P1NBP3/1PQ2PPP/R1B2RK1 b - - 0 13');
+  const move=chess.move('Ng4'),uci=uciMove(move),before={...cp(-50,[uci,'f2f4']),configKey:'coach-king-attack'};
+  const pv=['h7f8','d6h2','g1h1','d8h4','d3h7','g8f8','f1d1','h2g3','h1g1','h4h2','g1f1','h2g2','f1e1','g3f2','e1d2','f2e3','d2e1','g2g1','e1e2','g1f2','e2d3','c5c4'];
+  const after={...cp(-50,['f2f4']),moveReview:{version:1,fen:move.before,uci,configKey:before.configKey,
+    beforeScore:before.score,beforeDepth:before.depth,beforeBestmove:before.bestmove,
+    score:before.score,depth:16,pv:[uci,'f2f4'],source:'best',sacrificeReview:{
+      version:1,status:'verified',fen:move.after,rootFen:move.before,uci,configKey:before.configKey,
+      requestedDepth:15,restrictedMoves:['h7f8'],branches:[{capture:'h7f8',score,depth:15,pv,
+        multipvComplete:true,verified:true,status:'verified',source:'search',bestResponse:false}],
+    }}};
+  return {game:{startFen:move.before,moves:[move],positions:[move.before,move.after],headers:{}},index:1,move,before,after};
+}
+
+test('a rook offer is not explained as compensated by its first small pawn capture',()=>{
+  const context=attackingSacrificeFixture(),original=JSON.stringify(context);
+  const insight=explainMove(context.move,context.before,context.after);
+  const core=createInsightLine({...context,insight},'sacrifice');
+  const full=createInsightLine({...context,insight},'sacrifice','full');
+  assert.deepEqual(core.steps.map(step=>step.san),['Nxf8','Bxh2+','Kh1','Qh4','Bh7+','Kxf8']);
+  assert.equal(insight.sacrifice.focus.payoff,null,'the pawn and knight do not fully recover the rook within this core');
+  assert.equal(core.steps.length,6);
+  assert.equal(full.steps.length,22);
+  assert.match(insight.sacrificeFact,/기물을 바로 되찾기보다 비숍의 체크로 상대 왕을 압박/);
+  assert.match(insight.sacrificeFact,/이 응수에는 흑이 11수 안에 체크메이트할 것으로 분석/);
+  assert.match(insight.sacrificeFact,/핵심 장면 뒤에도 공격이 이어지는 예상 수순/);
+  assert.doesNotMatch(insight.sacrificeFact,/룩을 되찾|기물을 모두 회수|폰으로 보상|중앙 공격|갬빗/);
+  assert.equal(core.seek(6).isCheckmate(),false);
+  assert.equal(full.seek(22).isCheckmate(),true);
+  assert.equal(JSON.stringify(context),original);
+});
+
+test('an attacking example with only a centipawn score does not invent a forced mate or a material recovery',()=>{
+  const context=attackingSacrificeFixture({type:'cp',value:-50});
+  const insight=explainMove(context.move,context.before,context.after);
+  assert.equal(insight.sacrifice.focus.length,6);
+  assert.match(insight.sacrificeFact,/이 응수 뒤의 평가는 \+0\.50 \(흑 기준\)로 조금 유리/);
+  assert.match(insight.sacrificeFact,/기물 회수 외의 보상도 반영한 예상/);
+  assert.doesNotMatch(insight.sacrificeFact,/체크메이트|기물을 모두 되찾|강제로/);
 });

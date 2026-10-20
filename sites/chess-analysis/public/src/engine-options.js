@@ -34,9 +34,9 @@ export function searchOptions(depth, performance = DEFAULT_PERFORMANCE) {
 export function analysisKey(id, depth, performance, scope = 'position') {
   const options = scope === 'game' ? gameReviewOptions(depth, performance) : searchOptions(depth, performance);
   // The scope distinguishes a completed game review from an explicitly requested
-  // position search with more candidates. v3 also invalidates comparisons made
-  // before played-move searches were limited to the root's completed depth.
-  return ['review-v3',scope,id, options.depth, options.movetime, options.multipv, options.hash, options.threads].join(':');
+  // position search with more candidates. v4 also refreshes reviews that lack
+  // verified acceptance branches for sacrifice grading and explanations.
+  return ['review-v4',scope,id, options.depth, options.movetime, options.multipv, options.hash, options.threads].join(':');
 }
 
 export function reviewOptions(depth, performance = DEFAULT_PERFORMANCE) {

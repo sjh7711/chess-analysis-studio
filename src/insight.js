@@ -1,4 +1,4 @@
-import { Chess, classifyMove, assessedMoveResult, GRADING_BASIS, formatScore, gameAt, scoreValue, uciMove } from './chess-core.js';
+import { Chess, classifyMove, assessedMoveResult, reviewedSacrificeEvidence, GRADING_BASIS, formatScore, gameAt, scoreValue, uciMove } from './chess-core.js';
 import { AnalysisLine, PIECE_NAMES, materialBalance, moveText } from './study.js';
 
 const side = color => color === 'w' ? '백' : '흑';
@@ -9,23 +9,31 @@ const mateWinner = score => score?.type === 'mate' ? (scoreValue(score) > 0 ? 'w
 
 // Both branches stay anchored to the reviewed move, even when switching during playback.
 export function createInsightLine({game,index,insight,before,after}, kind, scope='core') {
-  if (!insight || !['response','alternative'].includes(kind) || !['core','full'].includes(scope)) return null;
-  const response = kind === 'response';
-  const source = response ? insight.response : insight.alternative;
-  const result = response ? assessedMoveResult(before,after,game.moves[index-1]) : before;
+  if (!insight || !['response','alternative','sacrifice'].includes(kind) || !['core','full'].includes(scope)) return null;
+  const move=game.moves[index-1];
+  if (!move) return null;
+  const response = kind === 'response', sacrifice=kind==='sacrifice', afterMove=response||sacrifice;
+  // Revalidate the current identity instead of trusting an old explanation
+  // object after a new analysis or game has replaced its source result.
+  const source = sacrifice ? sacrificeContinuation(move,before,after) : response ? insight.response : insight.alternative;
+  if (!source?.focus || !source.pv?.length) return null;
+  const result = sacrifice ? source.result : response ? assessedMoveResult(before,after,move) : before;
   const count=scope==='core' ? source.focus.length : source.pv.length;
-  const line = new AnalysisLine(gameAt(game,response ? index : index-1),source.pv.slice(0,count),result);
+  const line = new AnalysisLine(gameAt(game,afterMove ? index : index-1),source.pv.slice(0,count),result);
   if (!line.steps.length) return null;
+  for (const step of line.steps) step.explanation=exampleStepComment(step);
   line.kind = 'pv';
   line.sourceScore = source.score;
   line.sourceDepth = result.depth;
-  line.title = `${response ? '실전 수 이후 응수' : '실전 수 대신 대안'} · ${scope==='core'?'핵심 장면':'전체 예상 수순'}`;
+  line.title = sacrifice ? `상대가 희생을 받아들이면 · ${scope==='core'?'핵심 예시':'전체 예시 수순'}`
+    : `${response ? '실전 수 이후 응수' : '실전 수 대신 대안'} · ${scope==='core'?'핵심 장면':'전체 예상 수순'}`;
   line.reviewIndex = index;
   line.reviewKind = kind;
   line.reviewScope = scope;
   line.fullLength = source.pv.length;
   line.focusNote = source.focus.note;
-  line.startLabel = `${moveTurn(game.moves[index-1])} ${response ? '이후' : '직전'} · ${line.base.turn() === 'w' ? '백' : '흑'} 차례`;
+  line.startLabel = `${moveTurn(move)} ${afterMove ? '이후' : '직전'} · ${line.base.turn() === 'w' ? '백' : '흑'} 차례${sacrifice?' · 희생 수락을 가정한 예시':''}`;
+  if (sacrifice) { line.conditional=true;line.bestResponse=false; }
   return line;
 }
 
@@ -40,6 +48,57 @@ function continuation(fen, result) {
     if (chess.isGameOver()) break;
   }
   return { moves, pv:moves.map(uciMove), final:chess, score:result?.score };
+}
+
+function sacrificeContinuation(move,before,after) {
+  const evidence=reviewedSacrificeEvidence(before,after,move);
+  if (!evidence) return null;
+  const {offer,branch}=evidence;
+  const result={...assessedMoveResult(before,after,move),score:branch.score,depth:branch.depth,
+    bestmove:branch.capture,lines:[{...branch,multipv:1}],conditional:true,bestResponse:false};
+  const line=continuation(move.after,result),capture=line.moves[0];
+  if (line.moves.length!==branch.pv.length || line.moves.length<2 || !capture?.captured
+    || capture.color===move.color || capturedSquare(capture)!==offer.square || capture.captured!==offer.piece) return null;
+  // A small pawn capture is not the payoff for offering a rook. Stop early
+  // only at mate or a settled exchange recovering the pre-sacrifice balance.
+  const sign=move.color==='w'?1:-1,initial=materialBalance(pieces(new Chess(move.before))).difference*sign;
+  let payoff=null;
+  for(let index=1;index<Math.min(line.moves.length,NEAR_CONSEQUENCE_PLIES);index++) {
+    const step=line.moves[index];
+    if(step.color!==move.color)continue;
+    if(new Chess(step.after).isCheckmate()){payoff={index,end:index+1,kind:'mate'};break;}
+    if(!step.captured && !step.promotion)continue;
+    const {end,incomplete}=exchangeEnd(line,index);
+    if(incomplete || end>NEAR_CONSEQUENCE_PLIES)continue;
+    const final=materialBalance(pieces(new Chess(line.moves[end-1].after))).difference*sign;
+    if(final>=initial){payoff={index,end,kind:'material'};break;}
+  }
+  const length=payoff ? payoff.end : Math.min(line.moves.length,NEAR_CONSEQUENCE_PLIES);
+  const last=line.moves[length-1],position=new Chess(last.after);
+  const incomplete=position.isCheck() || !!last.captured && position.moves({verbose:true}).some(reply=>reply.captured && capturedSquare(reply)===last.to);
+  line.focus={length,incomplete,payoff,note:'상대가 희생을 받아들였다고 가정한 예시입니다. 최선의 방어 수순과 다르며, 상대는 다른 응수를 선택할 수 있습니다.'};
+  line.result=result;line.offer={...offer};line.conditional=true;line.bestResponse=false;
+  return line;
+}
+
+function exampleStepComment(move) {
+  const action=moveText(move),purpose=basicMoveComment(move);
+  return action+(purpose!==action && !/에서 .*로 옮깁니다\.$/.test(purpose) ? ` ${purpose}` : '');
+}
+
+function sacrificeExplanation(move,line) {
+  if(line.focus.payoff) {
+    const payoff=line.moves[line.focus.payoff.index];
+    return `이 예시에서는 ${exampleStepComment(line.moves[1])}${payoff!==line.moves[1]?` 이어 ${moveText(payoff)}`:''}`;
+  }
+  const checks=[...new Set(line.moves.slice(1,line.focus.length).filter(step=>step.color===move.color && /[+#]$/.test(step.san)).map(step=>PIECE_NAMES[step.piece]))];
+  const scene=checks.length ? `기물을 바로 되찾기보다 ${checks.join('·')}의 체크로 상대 왕을 압박합니다.`
+    : '이 장면에서는 내준 기물을 모두 되찾지 않습니다.';
+  const mate=line.score?.type==='mate' && mateWinner(line.score)===move.color;
+  const evaluation=mate
+    ? `이 응수에는 ${side(move.color)}이 ${Math.abs(line.score.value)}수 안에 체크메이트할 것으로 분석됩니다. 핵심 장면 뒤에도 공격이 이어지는 예상 수순입니다.`
+    : `이 응수 뒤의 평가는 ${formatScore(line.score,move.color)} (${side(move.color)} 기준)로 ${scoreValue(line.score,move.color)>=100?'유리하며':scoreValue(line.score,move.color)>=30?'조금 유리하며':'대등한 편이며'}, 기물 회수 외의 보상도 반영한 예상입니다.`;
+  return `${scene} ${evaluation}`;
 }
 
 function firstMoveFact(line) {
@@ -160,6 +219,27 @@ export function explainMistake(move, before, after, context = {}) {
     response, alternative,
     basis:`예상 승점 ${(grade.pointsLoss*100).toFixed(1)}%p 감소. ${GRADING_BASIS} 평가 손실은 잃은 기물 점수나 손실까지의 이동 횟수가 아닙니다.`,
   };
+}
+
+// The lightbulb explains every completed move. The main defensive PV and an
+// acceptance example are separate lines with separate scores and identities.
+export function explainMove(move,before,after,context={}) {
+  const grade=move && classifyMove(before,after,move,context);
+  if (!grade) return null;
+  if (grade.severity>=1) return {...explainMistake(move,before,after,context),kind:'mistake',moveFact:moveText(move),sacrifice:null,sacrificeFact:''};
+  const assessed=assessedMoveResult(before,after,move);
+  const response=focusContinuation(move,continuation(move.after,assessed));
+  const alternative=focusContinuation(move,continuation(move.before,before),true);
+  const sacrifice=sacrificeContinuation(move,before,after);
+  const purpose=exceptionalMoveComment(move,{reason:''});
+  const reason=grade.reason || (grade.key==='best' ? '분석한 후보 중 가장 높은 평가를 지키는 수입니다.'
+    : grade.key==='excellent' ? '엔진이 예상한 승점을 거의 지키는 선택입니다.'
+    : '최선수와 비교해 예상 승점의 감소를 작게 유지한 선택입니다.');
+  const sacrificeFact=sacrifice ? sacrificeExplanation(move,sacrifice) : '';
+  return {kind:'move',grade,moveFact:moveText(move),purposeFact:purpose,reason,summary:[purpose,reason].filter(Boolean).join(' '),
+    response,responseFact:firstMoveFact(response),alternative,alternativeFact:recommendedMove(alternative),
+    sacrifice,sacrificeFact,riskFact:'',materialFact:'',lossText:'이 수의 의미',
+    evaluation:`수 전 ${formatScore(before.score)} → 수 후 ${formatScore(assessed.score)} (백 기준)`,basis:GRADING_BASIS};
 }
 
 const VALUES = {p:1,n:3,b:3,r:5,q:9,k:100};
@@ -311,11 +391,19 @@ function coachReply(line) {
   return firstMoveFact(line);
 }
 
+function exceptionalMoveComment(move,grade) {
+  let fact=basicMoveComment(move);
+  // Name the piece and its route when a short attack description only names
+  // the target. The grading reason describes an offer, never its acceptance.
+  if (/^[a-h][1-8]의/.test(fact)) fact=`${object(move.piece)} ${move.from}에서 ${move.to}로 옮겨 ${fact}`;
+  return [fact.match(/^.*?\./)?.[0]||fact,grade.reason].filter(Boolean).join(' ');
+}
+
 // Short, board-grounded explanations; no opening-book or proprietary review labels.
 export function describeMove(move,before,after,context = {}) {
   if (!move) return {grade:null,text:'기보에서 수를 선택하면 그 수의 의미를 설명합니다.'};
   const grade=classifyMove(before,after,move,context);
-  if (!grade || grade.severity<1) return {grade,text:grade?.reason && ['brilliant','great'].includes(grade.key) ? `${grade.reason} ${basicMoveComment(move)}` : basicMoveComment(move)};
+  if (!grade || grade.severity<1) return {grade,text:grade && ['brilliant','great'].includes(grade.key) ? exceptionalMoveComment(move,grade) : basicMoveComment(move)};
   after=assessedMoveResult(before,after,move);
   const reply=focusContinuation(move,continuation(move.after,after)), alternative=coachAlternative(continuation(move.before,before));
   const opponent=reply.moves[0];
