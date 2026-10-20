@@ -246,23 +246,91 @@ function basicMoveComment(move) {
   return `${object(move.piece)} ${move.from}에서 ${move.to}로 옮깁니다.`;
 }
 
+// A positional recommendation needs a reason visible on the board. Do not turn
+// a balanced recapture into the explanation for an engine's positional verdict.
+function coachPlan(move) {
+  const before=new Chess(move.before), after=new Chess(move.after), enemy=move.color==='w'?'b':'w';
+  const targets=attackedBy(after,move.to,move.color).filter(piece=>piece.type!=='k').sort((a,b)=>VALUES[b.type]-VALUES[a.type]);
+  const fresh=targets.filter(piece=>!before.attackers(piece.square,move.color).includes(move.from));
+  const centers=['d4','e4','d5','e5'].filter(square=>after.attackers(square,move.color).includes(move.to));
+  const developed=['n','b'].includes(move.piece) && move.from[1]===(move.color==='w'?'1':'8') && Number(move.before.split(' ')[5])<=10;
+  const defended=pieces(after).filter(piece=>piece.color===move.color && piece.square!==move.to && piece.type!=='k'
+    && before.isAttacked(piece.square,enemy) && after.attackers(piece.square,move.color).includes(move.to)
+    && !before.attackers(piece.square,move.color).includes(move.from)).sort((a,b)=>VALUES[b.type]-VALUES[a.type]);
+  if (move.san.endsWith('#')) return {kind:'mate',move};
+  if (move.san.endsWith('+')) return {kind:'check',move};
+  if (fresh.length>=2 && fresh[1].type!=='p') return {kind:'fork',move,targets:fresh.slice(0,2),benefit:`${fresh.slice(0,2).map(targetName).join('·')}${fresh[1].type==='n'?'를':'을'} 동시에 공격할`};
+  if (defended.length) return {kind:'defend',move,targets:[defended[0]],benefit:`공격받던 ${targetName(defended[0])}${defended[0].type==='n'?'를':'을'} 지킬`};
+  if (developed) return {kind:'develop',move,centers,targets:fresh,benefit:fresh.length
+    ? `${targetName(fresh[0])}${fresh[0].type==='n'?'를':'을'} 공격하며 전개할`
+    : centers.length ? `중앙의 ${centers.join('·')} 칸을 제어하며 전개할` : `${object(move.piece)} 전개할`};
+  if (before.isAttacked(move.from,enemy) && !after.isAttacked(move.to,enemy)) return {kind:'escape',move,benefit:'상대의 공격을 피할'};
+  if (fresh.length) return {kind:'attack',move,targets:[fresh[0]],benefit:`${targetName(fresh[0])}${fresh[0].type==='n'?'를':'을'} 공격할`};
+  if (move.piece==='r' && !pieces(after).some(piece=>piece.type==='p' && piece.square[0]===move.to[0])) return {kind:'file',move,benefit:`폰이 없는 ${move.to[0]}파일을 차지할`};
+  if (centers.length) return {kind:'center',move,centers,benefit:`중앙의 ${centers.join('·')} 칸을 제어할`};
+  return {kind:'move',move};
+}
+
+function coachAlternative(line) {
+  const move=line.moves[0];
+  if (!move) return null;
+  const plan=coachPlan(move);
+  // Captures, castling, promotions and checks retain every effect in moveText.
+  const text=move.captured || move.promotion || /[+#]$/.test(move.san) || /[kq]/.test(move.flags) || !plan.benefit
+    ? recommendedMove(line)
+    : `대신 ${side(move.color)} ${object(move.piece)} ${move.from}에서 ${move.to}로 옮겨 ${plan.benefit} 수 있었습니다.`;
+  return {...plan,text};
+}
+
+function coachOpportunity(move,alternative) {
+  if (!alternative) return '';
+  const actual=coachPlan(move), after=new Chess(move.after), better=alternative.move;
+  if (alternative.kind==='develop' && actual.kind!=='develop' && !['n','b'].includes(move.piece)) {
+    return `${move.captured?`${object(move.captured)} 잡기보다 `:''}${object(better.piece)} 먼저 전개할 기회를 놓쳤습니다.`;
+  }
+  if (alternative.kind==='defend') {
+    const target=alternative.targets[0];
+    if (after.get(target.square)?.color===move.color && !after.attackers(target.square,move.color).includes(move.to)) return `공격받던 ${targetName(target)}${target.type==='n'?'를':'을'} 지키는 수를 먼저 찾을 수 있었습니다.`;
+  }
+  if (['fork','attack'].includes(alternative.kind)) {
+    const targets=alternative.targets;
+    if (targets.some(target=>!after.attackers(target.square,move.color).includes(move.to))) return alternative.kind==='fork'
+      ? `${PIECE_NAMES[better.piece]}${better.piece==='n'?'로':'으로'} 두 기물을 동시에 공격할 기회를 놓쳤습니다.`
+      : `${targets.map(targetName).join('·')}${targets.at(-1).type==='n'?'를':'을'} 공격할 기회를 놓쳤습니다.`;
+  }
+  return '';
+}
+
+function coachReply(line) {
+  const move=line.moves[0];
+  if (!move) return '';
+  if (!move.captured && !move.promotion && !/[+#]$/.test(move.san)) {
+    const targets=attackedBy(new Chess(move.after),move.to,move.color).filter(piece=>!['p','k'].includes(piece.type)).sort((a,b)=>VALUES[b.type]-VALUES[a.type]);
+    if (targets.length) return `상대는 ${object(move.piece)} ${move.from}에서 ${move.to}로 옮겨 ${targetName(targets[0])}${targets[0].type==='n'?'를':'을'} 공격할 수 있습니다.`;
+  }
+  return firstMoveFact(line);
+}
+
 // Short, board-grounded explanations; no opening-book or proprietary review labels.
 export function describeMove(move,before,after,context = {}) {
   if (!move) return {grade:null,text:'기보에서 수를 선택하면 그 수의 의미를 설명합니다.'};
   const grade=classifyMove(before,after,move,context);
   if (!grade || grade.severity<1) return {grade,text:grade?.reason && ['brilliant','great'].includes(grade.key) ? `${grade.reason} ${basicMoveComment(move)}` : basicMoveComment(move)};
   after=assessedMoveResult(before,after,move);
-  const reply=focusContinuation(move,continuation(move.after,after)), alternative=continuation(move.before,before);
+  const reply=focusContinuation(move,continuation(move.after,after)), alternative=coachAlternative(continuation(move.before,before));
   const opponent=reply.moves[0];
-  if (after.score.type==='mate' && mateWinner(after.score)!==move.color) return {grade,text:after.score.value===0 ? '체크메이트당했습니다.' : `상대에게 ${Math.abs(after.score.value)}수 안의 체크메이트 수순을 허용했습니다.${opponent ? ` ${firstMoveFact(reply)}` : ''}`};
-  if (before.score.type==='mate' && mateWinner(before.score)===move.color && mateWinner(after.score)!==move.color) return {grade,text:`체크메이트 기회를 놓쳤습니다.${alternative.moves[0] ? ` ${recommendedMove(alternative)}` : ''}`};
+  const finish=reason=>({grade,text:[reason,alternative?.text].filter(Boolean).join(' ')});
+  if (after.score.type==='mate' && mateWinner(after.score)!==move.color) return finish(after.score.value===0 ? '체크메이트당했습니다.' : `상대에게 ${Math.abs(after.score.value)}수 안의 체크메이트 수순을 허용했습니다.${!alternative && opponent ? ` ${coachReply(reply)}` : ''}`);
+  if (before.score.type==='mate' && mateWinner(before.score)===move.color && mateWinner(after.score)!==move.color) return finish('체크메이트 기회를 놓쳤습니다.');
   const consequence=reply.consequence;
-  if(consequence) return {grade,text:consequence.distant ? distantRisk(consequence) : lossCause(move,reply,consequence.capture)};
-  if (opponent?.captured) return {grade,text:`${firstMoveFact(reply)}${reply.focus.note ? ` ${reply.focus.note}` : ''}`};
-  const better=alternative.moves[0];
-  if (better) {
-    const targets=attackedBy(new Chess(better.after),better.to,better.color).sort((a,b)=>VALUES[b.type]-VALUES[a.type]);
-    if (targets.length>=2 && targets[1].type!=='p') return {grade,text:`${recommendedMove(alternative)} 그러면 ${targets.slice(0,2).map(targetName).join('·')}${targets[1].type==='n'?'를':'을'} 동시에 공격할 수 있었습니다.`};
-  }
-  return {grade,text:[opponent?firstMoveFact(reply):'',better?recommendedMove(alternative):'이 수의 대안을 확인하려면 앞 국면을 분석해 주세요.'].filter(Boolean).join(' ')};
+  if(consequence && !consequence.distant) return finish(lossCause(move,reply,consequence.capture));
+  const opportunity=coachOpportunity(move,alternative);
+  if (opportunity) return finish(opportunity);
+  // A missed tactic available now teaches more than a speculative capture many
+  // moves later. Keep an immediate, verified loss ahead of either explanation.
+  if(consequence) return finish(`${consequence.ply>NEAR_CONSEQUENCE_PLIES?`긴 예상 수순의 ${consequence.ply}번째 이동에서`:'이어지는 긴 교환에서'} ${moveText(consequence.capture,'phrase')}가 가능하지만, 이후 선택에 따라 달라질 수 있습니다.`);
+  let fact=coachReply(reply);
+  if (opponent?.captured && reply.focus.incomplete) fact=fact.replace(/있습니다\.$/,'있지만, 후속 응수가 부족해 교환의 최종 결과는 아직 확인되지 않았습니다.');
+  if (fact) return finish(fact);
+  return finish(alternative?'':'구체적인 응수와 대안을 확인하려면 앞뒤 국면을 다시 분석해 주세요.');
 }

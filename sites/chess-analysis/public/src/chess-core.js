@@ -125,7 +125,7 @@ export const MOVE_GRADES = Object.freeze({
   inaccuracy:{label:'부정확',symbol:'?!'}, mistake:{label:'실수',symbol:'?'},
   miss:{label:'놓친 기회',symbol:'×'}, blunder:{label:'블런더',symbol:'??'},
 });
-export const GRADING_BASIS = 'Chess.com 공개 예상 승점 감소 구간: 우수한 수 0~2%p, 좋은 수 2~5%p, 부정확 5~10%p, 실수 10~20%p, 블런더 20%p 이상. 최선의 수는 엔진의 1순위 수입니다. 이 앱은 경계값부터 다음 등급을 적용하며, 예상 승점 환산과 특수 분류는 자체 추정입니다. Chess.com의 레이팅별 환산식과 CAPS2 정확도 계산식은 공개되지 않아 동일한 결과를 보장하지 않습니다.';
+export const GRADING_BASIS = 'Chess.com 공개 예상 승점 감소 구간: 우수한 수 0~2%p, 좋은 수 2~5%p, 부정확 5~10%p, 실수 10~20%p, 블런더 20%p 이상. 최선의 수는 엔진 1순위 또는 같은 완료 깊이에서 동일한 평가를 받은 후보입니다. 이 앱은 경계값부터 다음 등급을 적용하며, 예상 승점 환산과 특수 분류는 자체 추정입니다. Chess.com의 레이팅별 환산식과 CAPS2 정확도 계산식은 공개되지 않아 동일한 결과를 보장하지 않습니다.';
 
 // Transparent approximation, not a claim to reproduce Chess.com's undisclosed rating model.
 export function expectedPoints(score, color = 'w') {
@@ -178,34 +178,75 @@ function verifiedSacrifice(move, after) {
   } catch { return false; }
 }
 
-export function classifyMove(before, after, move, {previous} = {}) {
+function verifiedTopCandidate(before, move) {
+  if (before.bestmove===uciMove(move)) return true;
+  // Expected points saturate in won/lost positions. Only an actual equal root
+  // score at the same completed depth establishes a second best move.
+  if (!before.multipvComplete || !Number.isFinite(before.depth) || before.depth<1) return false;
+  const first=before.lines?.find(line=>line.multipv===1 && line.pv?.[0]===before.bestmove && line.depth===before.depth);
+  if (!first || !sameScore(first.score,before.score)) return false;
+  return before.lines.some(line=>line.depth===before.depth && line.pv?.[0]===uciMove(move) && sameScore(line.score,first.score));
+}
+
+function directCaptureReply(move, previousMove) {
+  // A direct capture of the piece just moved (including a recapture) is a
+  // routine response. A large gap to ignoring that piece is insufficient
+  // evidence for the separate Great distinction.
+  return !!(previousMove && previousMove.color!==move.color && previousMove.after===move.before
+    && move.captured && !move.promotion
+    && previousMove.to===move.to && move.captured===(previousMove.promotion||previousMove.piece));
+}
+
+function onlyLegalMove(move) {
+  if (!move.before) return false;
+  try { return new Chess(move.before).moves().length===1; }
+  catch { return false; }
+}
+
+function missedOpportunity(before, move, previous, previousMove, previousGrade) {
+  if (!previousMove || previousMove.color===move.color || previousMove.after!==move.before
+    || !hasMoveReview(previous,before,previousMove)) return false;
+  const opponent=previousMove.color, assessed=assessedMoveResult(previous,before,previousMove);
+  const opponentLoss=verifiedTopCandidate(previous,previousMove) ? 0
+    : Math.max(0,expectedPoints(previous.score,opponent)-expectedPoints(assessed.score,opponent));
+  // A clear opponent error can offer a win, a tactic, or a defensive recovery.
+  // A missed opportunity can continue that exchange; ordinary inaccuracies
+  // alone do not start a chain. Reuse the published grade bands, not absolute
+  // winning/drawing point estimates from an undisclosed rating model.
+  return opponentLoss>=0.10 || previousGrade?.key==='miss' && opponentLoss>=0.05;
+}
+
+export function classifyMove(before, after, move, {previous,previousMove,previousGrade} = {}) {
   if (!before || !after || !move) return null;
   const cached = gradeCache.get(move);
-  if (cached?.before===before && cached.after===after && cached.previous===previous) return cached.grade;
+  if (cached?.before===before && cached.after===after && cached.previous===previous
+    && cached.previousMove===previousMove && cached.previousGrade===previousGrade) return cached.grade;
   const assessed=assessedMoveResult(before,after,move);
   const sign = move.color === 'w' ? 1 : -1;
   let loss;
   if (before.score.type === 'mate' && assessed.score.type === 'mate' && Math.sign(scoreValue(before.score)) === Math.sign(scoreValue(assessed.score))) loss = 0;
   else loss = Math.max(0, (scoreValue(before.score) - scoreValue(assessed.score)) * sign);
-  const best = before.bestmove === uciMove(move);
+  const best = verifiedTopCandidate(before,move);
   if (best) loss=0;
   const beforePoints=expectedPoints(before.score,move.color), afterPoints=expectedPoints(assessed.score,move.color);
   const pointsLoss=best ? 0 : Math.max(0,beforePoints-afterPoints);
   let key=best ? 'best' : pointsLoss<0.02 ? 'excellent' : pointsLoss<0.05 ? 'good' : pointsLoss<0.10 ? 'inaccuracy' : pointsLoss<0.20 ? 'mistake' : 'blunder';
   let severity=pointsLoss>=0.20 ? 3 : pointsLoss>=0.10 ? 2 : pointsLoss>=0.05 ? 1 : 0;
   let reason='';
-  const second=before.lines?.find(line=>line.multipv===2 && line.score && line.depth===before.depth);
+  const second=before.multipvComplete && Number.isFinite(before.depth) && before.depth>0
+    ? before.lines?.find(line=>line.multipv===2 && line.score && line.pv?.[0] && line.pv[0]!==before.bestmove && line.depth===before.depth) : null;
   if (pointsLoss<0.02 && afterPoints>=0.45 && beforePoints<0.90 && verifiedSacrifice(move,assessed)) {
     key='brilliant'; reason='예상 응수에서 기물을 희생하면서도 국면을 유지하는 수입니다.';
-  } else if (best && second && afterPoints>=0.45 && beforePoints-expectedPoints(second.score,move.color)>=0.10) {
+  } else if (best && second && afterPoints>=0.45 && beforePoints-expectedPoints(second.score,move.color)>=0.10
+    && !directCaptureReply(move,previousMove) && !onlyLegalMove(move)) {
     key='great'; reason='다른 후보보다 예상 승점을 크게 지키는 결정적인 수입니다.';
-  } else if (!best && previous && beforePoints>=0.75 && afterPoints<=0.55 && beforePoints-expectedPoints(previous.score,move.color)>=0.10) {
-    key='miss'; severity=Math.max(2,severity); reason='상대 실수로 생긴 승리 기회를 살리지 못했습니다.';
+  } else if (!best && pointsLoss>=0.05 && missedOpportunity(before,move,previous,previousMove,previousGrade)) {
+    key='miss'; severity=Math.max(2,severity); reason='상대의 실수로 생긴 기회를 살리지 못했습니다.';
   } else if (pointsLoss<0.05 && isBookMove(move)) {
     key='book'; reason='등록된 오프닝 수순에 있는 이론 수입니다.';
   }
   const grade={key,...MOVE_GRADES[key],loss,pointsLoss,severity,reason};
-  gradeCache.set(move,{before,after,previous,grade});
+  gradeCache.set(move,{before,after,previous,previousMove,previousGrade,grade});
   return grade;
 }
 

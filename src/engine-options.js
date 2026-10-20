@@ -31,15 +31,25 @@ export function searchOptions(depth, performance = DEFAULT_PERFORMANCE) {
   const limits = { 12: 600, 16: 1200, 20: 3000, 24: 5000 };
   return { depth, movetime: performance.movetime || limits[depth] || 1200, multipv: performance.multipv, hash: performance.hash, threads: performance.threads };
 }
-export function analysisKey(id, depth, performance) {
-  const options = searchOptions(depth, performance);
-  return ['review-v2',id, options.depth, options.movetime, options.multipv, options.hash, options.threads].join(':');
+export function analysisKey(id, depth, performance, scope = 'position') {
+  const options = scope === 'game' ? gameReviewOptions(depth, performance) : searchOptions(depth, performance);
+  // The scope distinguishes a completed game review from an explicitly requested
+  // position search with more candidates. v3 also invalidates comparisons made
+  // before played-move searches were limited to the root's completed depth.
+  return ['review-v3',scope,id, options.depth, options.movetime, options.multipv, options.hash, options.threads].join(':');
 }
 
 export function reviewOptions(depth, performance = DEFAULT_PERFORMANCE) {
   const options = searchOptions(depth, performance);
   if (performance.reviewMode === 'precise') return options;
   return { ...options, multipv: Math.min(2, options.multipv), movetime: Math.min(1500, Math.ceil(options.movetime / 2)) };
+}
+
+export function gameReviewOptions(depth, performance = DEFAULT_PERFORMANCE) {
+  const options = reviewOptions(depth, performance);
+  // Move grading uses the best move and its runner-up. More alternatives remain
+  // available through searchOptions for a user-requested position analysis.
+  return { ...options, multipv: Math.min(2, options.multipv) };
 }
 
 const fullEngineUrls = new Map();

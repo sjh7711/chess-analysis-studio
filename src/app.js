@@ -1,7 +1,7 @@
 import { Chess, parseGame, gameAt, classifyMove, hasMoveReview, assessedMoveResult, MOVE_GRADES, GRADING_BASIS, formatScore, scoreValue, pvToSan, exportPgn } from './chess-core.js';
 import { StockfishEngine } from './engine.js';
 import { reviewMove } from './review.js';
-import { ENGINES, engineId, normalizePerformance, supportedThreads, searchOptions, reviewOptions, analysisKey } from './engine-options.js';
+import { ENGINES, engineId, normalizePerformance, supportedThreads, searchOptions, reviewOptions, gameReviewOptions, analysisKey } from './engine-options.js';
 import { pieceSvg, pieceSnapshot, pieceTransitions, StepNavigation, capturedPieces, capturedMarkup } from './pieces.js';
 import { BoardAnnotations } from './annotations.js';
 import { SAMPLE_PGN } from './sample.js';
@@ -66,18 +66,26 @@ function displayScore(score) { return formatScore(score, evaluationColor()); }
 function displayValue(score) { return scoreValue(score, evaluationColor()); }
 function evaluationHint() { return `${evaluationSide()} 기준 (+ ${evaluationSide()} 우세, − ${state.flipped ? '백' : '흑'} 우세)`; }
 function currentResult() { return state.line ? state.line.results.get(state.line.cursor) : state.results.get(state.index); }
-function gradeAt(index) {
-  const before=state.results.get(index-1),after=state.results.get(index),move=state.game.moves[index-1];
-  return hasMoveReview(before,after,move) ? classifyMove(before,after,move,{previous:state.results.get(index-2)}) : null;
+function gradesThrough(results,moves,index) {
+  let grade=null;
+  for (let i=1;i<=index;i++) {
+    const before=results.get(i-1),after=results.get(i),move=moves[i-1];
+    grade=hasMoveReview(before,after,move) ? classifyMove(before,after,move,{previous:results.get(i-2),previousMove:moves[i-2],previousGrade:grade}) : null;
+  }
+  return grade;
+}
+function gradeAt(index) { return gradesThrough(state.results,state.game.moves,index); }
+function gradeContext(results,moves,index) {
+  return {previous:results.get(index-2),previousMove:moves[index-2],previousGrade:gradesThrough(results,moves,index-1)};
 }
 function reviewedPositionCount() { return state.game.positions.filter((_,index)=>isCached(state.results.get(index)) && (!index || hasMoveReview(state.results.get(index-1),state.results.get(index),state.game.moves[index-1]))).length; }
 function shownResult() { return state.editor ? null : currentResult(); }
-function configKey() { return analysisKey(selectedEngine,Number($('depth').value),performanceOptions); }
+function configKey(scope='position') { return analysisKey(selectedEngine,Number($('depth').value),performanceOptions,scope); }
 function isCached(result) {
   if (!result) return false;
   if (result.terminal) return true;
   if (result.overview && performanceOptions.reviewMode === 'precise') return false;
-  if (result.configKey) return result.configKey === configKey();
+  if (result.configKey) return result.configKey === configKey() || result.configKey === configKey('game');
   return false;
 }
 function createEngine(run) {
@@ -121,7 +129,7 @@ async function analyzeCurrent(force = false) {
   const cached=currentResult(),position=state.line?.cursor??state.index,results=state.line?state.line.results:state.results;
   const move=state.line?state.line.steps[position-1]:state.game.moves[position-1],before=results.get(position-1);
   const needsReview=move && isCached(before) && !hasMoveReview(before,cached,move);
-  if (!force && isCached(cached) && !cached.overview && !needsReview) { renderAnalysis(); schedulePlayback(); return; }
+  if (!force && isCached(cached) && !needsReview) { renderAnalysis(); schedulePlayback(); return; }
   stopJob();
   const run = generation;
   const chess = currentChess();
@@ -135,10 +143,11 @@ async function analyzeCurrent(force = false) {
   if (state.line) renderStudy();
   try {
     engine = createEngine(run);
-    let result = !force && isCached(cached) && !cached.overview ? {...cached} : await engine.analyze(chess, options);
+    const reused = !force && isCached(cached);
+    let result = reused ? {...cached} : await engine.analyze(chess, options);
     if (run !== generation) return;
     result.requestedDepth = options.depth;
-    result.configKey = configKey();
+    if (!reused) result.configKey = configKey();
     if (move && isCached(before)) {
       const root=line ? cloneChess(line.base) : gameAt(state.game,index-1);
       if (line) for (const step of line.steps.slice(0,position-1)) root.move(step.uci);
@@ -165,7 +174,7 @@ async function analyzeGame(restart = false) {
   if (restart) { state.results.clear(); persist(); }
   const run = generation;
   const options = searchOptions(Number($('depth').value),performanceOptions);
-  const overviewOptions = reviewOptions(Number($('depth').value),performanceOptions);
+  const overviewOptions = gameReviewOptions(Number($('depth').value),performanceOptions);
   completionAlerts.begin(run);
   document.title='체스 분석';
   let analyzed=0;
@@ -179,10 +188,10 @@ async function analyzeGame(restart = false) {
       let result=state.results.get(index),changed=false;
       if (!isCached(result)) {
         const detailed = performanceOptions.reviewMode === 'precise';
-        result = await engine.analyze(chess, detailed ? options : overviewOptions);
+        result = await engine.analyze(chess, overviewOptions);
         if (run !== generation) return;
         result.requestedDepth = options.depth;
-        result.configKey = configKey();
+        result.configKey = configKey('game');
         result.overview = !detailed;
         analyzed++;
         changed=true;
@@ -294,12 +303,14 @@ function renderCoach() {
   const cursor=state.line ? state.line.cursor : state.index;
   const move=state.line ? state.line.steps[cursor-1] : state.game.moves[cursor-1];
   const results=state.line ? state.line.results : state.results;
-  const before=results.get(cursor-1), after=hasMoveReview(before,results.get(cursor),move) ? results.get(cursor) : null, previous=results.get(cursor-2);
+  const moves=state.line ? state.line.steps : state.game.moves;
+  const context=gradeContext(results,moves,cursor);
+  const before=results.get(cursor-1), after=hasMoveReview(before,results.get(cursor),move) ? results.get(cursor) : null, previous=context.previous;
   let comment;
   if (state.editor) comment={grade:null,text:'기물 배치를 적용하면 이 국면에서 둘 수 있는 수를 분석합니다.'};
   else if (!move) comment={grade:null,text:`${currentChess().turn()==='w'?'백':'흑'} 차례입니다. 추천 수순을 열거나 보드에서 수를 두어 살펴보세요.`};
   else {
-    if (!coachCache || coachCache.move!==move || coachCache.before!==before || coachCache.after!==after || coachCache.previous!==previous) coachCache={move,before,after,previous,comment:describeMove(move,before,after,{previous})};
+    if (!coachCache || coachCache.move!==move || coachCache.before!==before || coachCache.after!==after || coachCache.previous!==previous || coachCache.previousGrade!==context.previousGrade) coachCache={move,before,after,previous,previousGrade:context.previousGrade,comment:describeMove(move,before,after,context)};
     comment=coachCache.comment;
   }
   $('coach-move').textContent=state.editor ? '배치 편집' : move ? moveLabel(move) : '시작 국면';
@@ -429,7 +440,7 @@ function renderInsight() {
     } else message += ` · ${escape(grade.reason || '국면의 평가를 잘 유지했습니다.')}`;
   } else if (state.mode === 'full') message = '앞뒤 국면을 모두 분석하면 이 수의 평가가 표시됩니다.';
   else if (move) message = `<strong>${escape(moveLabel(move))}</strong> · 전체 대국을 분석하면 수의 분류를 확인할 수 있어요.`;
-  const insight = !state.editor && !state.line && grade && explainMistake(move,before,after,{previous:state.results.get(state.index-2)});
+  const insight = !state.editor && !state.line && grade && explainMistake(move,before,after,gradeContext(state.results,state.game.moves,state.index));
   if (insight) {
     insightContext = { game:state.game,index:state.index,insight,before,after };
     renderInsightDetail(insightContext);
@@ -526,7 +537,7 @@ function renderReview() {
     if (grade) { counts[move.color][grade.key]++; reviewed++; if (grade.severity >= 2) critical.push({ index:i+1,move,...grade }); }
   });
   if (!reviewed) { $('review-content').innerHTML = '<div class="summary-empty">전체 대국 분석 후 수별 분류가 표시됩니다.</div>'; return; }
-  $('review-content').innerHTML = `<div class="summary-counts">${['w','b'].map(color => `<div class="summary-player"><h4>${color === 'w' ? '♔' : '♚'} ${escape(state.game.headers[color === 'w' ? 'White' : 'Black'] || (color === 'w' ? '백' : '흑'))}</h4>${Object.entries(MOVE_GRADES).map(([key,{label,symbol}]) => `<div class="summary-stat"><span><i class="grade-icon ${key}" aria-hidden="true">${symbol}</i>${label}</span><b>${counts[color][key]}</b></div>`).join('')}</div>`).join('')}</div><p class="review-explanation">${reviewed} / ${state.game.moves.length}번 이동 분류 완료 · ${[...state.results.values()].some(r=>r.overview)?'빠른 검토 포함':'정밀 검토'}</p><details class="grading-guide"><summary>수 분류 기준</summary><p>${GRADING_BASIS}</p><p>탁월수: 예상 응수에서 손해를 감수한 기물 희생으로 국면을 유지한 경우. 훌륭한 수: 같은 깊이의 다른 후보보다 예상 승점을 10%p 이상 지킨 최선의 수. 놓친 기회: 상대 실수로 생긴 승리 기회를 놓친 경우. 이론: 공개 오프닝 목록과 일치한 첫 10수 안의 수입니다.</p><p>탁월수·훌륭한 수·놓친 기회의 세부 조건은 앱 자체 추정이며, Chess.com의 비공개 레이팅별 판정과 일치하지 않을 수 있습니다. 이론은 등록된 수순에 한하며 모든 오프닝을 포함하지는 않습니다.</p><p>최선수와 실전 수는 같은 출발 국면에서 비교합니다. 그래프 점수는 각 국면을 독립적으로 분석한 값입니다. 예상 승점은 두는 쪽의 폰 단위 평가를 1 ÷ (1 + exp(−평가 ÷ 2.5))로 환산합니다. 체크메이트는 0 또는 1로 계산합니다.</p><p><a href="https://support.chess.com/en/articles/8572705-how-are-moves-classified-what-is-a-blunder-or-brilliant-etc" target="_blank" rel="noopener noreferrer">Chess.com 공식 분류 설명</a> · <a href="https://github.com/lichess-org/chess-openings" target="_blank" rel="noopener noreferrer">오프닝 자료 · CC0</a></p></details>${critical.length ? '<h3>다시 살펴볼 수</h3>' : ''}${critical.sort((a,b) => b.pointsLoss-a.pointsLoss).slice(0,5).map(item => `<button class="critical-button" data-review-index="${item.index}"><span>${escape(item.move.before.split(' ')[5])}${item.move.color === 'w' ? '.' : '...'} ${escape(item.move.san)} <small>(${item.move.color === 'w' ? '백' : '흑'})</small></span><span>${item.label} ↗</span></button>`).join('')}`;
+  $('review-content').innerHTML = `<div class="summary-counts">${['w','b'].map(color => `<div class="summary-player"><h4>${color === 'w' ? '♔' : '♚'} ${escape(state.game.headers[color === 'w' ? 'White' : 'Black'] || (color === 'w' ? '백' : '흑'))}</h4>${Object.entries(MOVE_GRADES).map(([key,{label,symbol}]) => `<div class="summary-stat"><span><i class="grade-icon ${key}" aria-hidden="true">${symbol}</i>${label}</span><b>${counts[color][key]}</b></div>`).join('')}</div>`).join('')}</div><p class="review-explanation">${reviewed} / ${state.game.moves.length}번 이동 분류 완료 · ${[...state.results.values()].some(r=>r.overview)?'빠른 검토 포함':'정밀 검토'}</p><details class="grading-guide"><summary>수 분류 기준</summary><p>${GRADING_BASIS}</p><p>탁월수: 예상 응수에서 손해를 감수한 기물 희생으로 국면을 유지한 경우. 훌륭한 수: 같은 깊이의 다른 후보보다 예상 승점을 10%p 이상 지킨 최선의 수로, 단순 되잡기와 유일한 합법 수는 제외합니다. 놓친 기회: 상대의 뚜렷한 실수로 생긴 공격·방어 기회를 살리지 못한 경우. 이론: 공개 오프닝 목록과 일치한 첫 10수 안의 수입니다.</p><p>탁월수·훌륭한 수·놓친 기회의 세부 조건은 앱 자체 추정이며, Chess.com의 비공개 레이팅별 판정과 일치하지 않을 수 있습니다. 이론은 등록된 수순에 한하며 모든 오프닝을 포함하지는 않습니다.</p><p>최선수와 실전 수는 같은 출발 국면에서 비교합니다. 그래프 점수는 각 국면을 독립적으로 분석한 값입니다. 예상 승점은 두는 쪽의 폰 단위 평가를 1 ÷ (1 + exp(−평가 ÷ 2.5))로 환산합니다. 체크메이트는 0 또는 1로 계산합니다.</p><p><a href="https://support.chess.com/en/articles/8572705-how-are-moves-classified-what-is-a-blunder-or-brilliant-etc" target="_blank" rel="noopener noreferrer">Chess.com 공식 분류 설명</a> · <a href="https://github.com/lichess-org/chess-openings" target="_blank" rel="noopener noreferrer">오프닝 자료 · CC0</a></p></details>${critical.length ? '<h3>다시 살펴볼 수</h3>' : ''}${critical.sort((a,b) => b.pointsLoss-a.pointsLoss).slice(0,5).map(item => `<button class="critical-button" data-review-index="${item.index}"><span>${escape(item.move.before.split(' ')[5])}${item.move.color === 'w' ? '.' : '...'} ${escape(item.move.san)} <small>(${item.move.color === 'w' ? '백' : '흑'})</small></span><span>${item.label} ↗</span></button>`).join('')}`;
 }
 
 function renderResults() { renderAnalysis(); renderMoves(); renderChart(); renderReview(); renderStudy(); }
@@ -743,7 +754,7 @@ function renderStudy() {
   $('playback-phase').textContent=state.playing
     ? state.line.cursor===0 && pieceMotions.size ? '재생 시작 위치로 이동 중…' : playback.phase==='reading' ? `분석 완료 · ${seconds}초 확인 후 다음 수` : `현재 수 분석 중 · 완료 후 ${seconds}초간 결과 표시`
     : state.error ? '현재 국면을 분석하지 못했습니다. 다시 분석해 주세요.'
-    : state.mode || !isCached(currentResult()) || currentResult()?.overview ? '현재 국면 분석 중 · 자동으로 재생하지 않습니다.'
+    : state.mode || !isCached(currentResult()) ? '현재 국면 분석 중 · 자동으로 재생하지 않습니다.'
     : ended && line.steps.length ? line.reviewScope==='core' ? line.fullLength>line.steps.length ? '핵심 장면에서 멈췄습니다. 후속 수순은 아래의 전체 예상 수순을 선택하세요.' : '핵심 장면에서 멈췄습니다. 저장된 후속 수순은 없습니다.' : '선택한 수순의 끝입니다. 다시 재생하거나 원본으로 돌아갈 수 있습니다.'
     : line.steps.length ? '분석 완료 · 재생을 누르면 수순이 진행됩니다.' : '분석 완료 · 기물을 움직여 탐색하세요.';
   const branchLabel = line.reviewKind ? `${line.reviewScope==='core'?'핵심 장면':'전체 예상 수순'} · ${line.reviewKind === 'response' ? '상대 응수' : '대안'} · ${moveTurn(line.steps[0])}부터` : line.kind==='pv' ? '추천 수 · 전체 예상 수순' : '탐색 범위';

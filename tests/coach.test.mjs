@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { Chess, parseGame, uciMove } from '../src/chess-core.js';
 import { describeMove } from '../src/insight.js';
+import { SAMPLE_PGN } from '../src/sample.js';
 
 const game=parseGame(readFileSync(new URL('./fixtures/review-example.pgn',import.meta.url),'utf8'));
 const cp=(value,pv=[])=>({score:{type:'cp',value},bestmove:pv[0],lines:[{pv}],depth:16});
@@ -89,4 +90,59 @@ test('loss explanations identify verified tactical causes rather than just namin
     assert.match(description.text,cause,san);
     assert.doesNotMatch(description.text,/예상 응수가 이어지면|undefined|NaN/);
   }
+});
+
+test('the sample pawn exchange explains the missed development instead of treating an equal recapture as the mistake',()=>{
+  const move=parseGame(SAMPLE_PGN).moves[11];
+  assert.equal(move.san,'dxe4');
+  const alternative=new Chess(move.before),bishop=alternative.move('Bc5');
+  assert.equal(alternative.get('f2'),undefined,'the suggested bishop does not attack a pawn on empty f2');
+  assert.equal(alternative.isCheck(),false,'the development is not check');
+  assert.ok(alternative.attackers('d4','b').includes('c5'));
+  const description=describeMove(move,cp(-25,[uciMove(bishop)]),cp(88,['d3e4','d8h4']));
+  assert.equal(description.grade.key,'mistake');
+  assert.match(description.text,/폰을 잡기보다 비숍을 먼저 전개할 기회/);
+  assert.match(description.text,/흑 비숍을 f8에서 c5로.*중앙의 d4 칸을 제어하며 전개/);
+  assert.equal(description.text.split('.').filter(Boolean).length,2);
+  assert.doesNotMatch(description.text,/차이는 유지|기물.*손해|f2.*폰|체크|Bc5|dxe4/);
+});
+
+test('a verified tactical loss retains its cause and adds the concrete defensive alternative',()=>{
+  const chess=new Chess('k7/8/3p4/4P3/8/5N2/8/4K3 w - - 0 10');
+  const move=chess.move('Nh4');
+  const before=cp(0,['e1e2']),after=cp(-300,['d6e5']);
+  const description=describeMove(move,before,after);
+  assert.match(description.text,/폰을 지키던 나이트가 자리를 떠나/);
+  assert.match(description.text,/대신 백 킹이 e1에서 e2로 이동/);
+  assert.equal(description.text.split('.').filter(Boolean).length,2);
+});
+
+test('a corrupt or mismatched alternative never invents a missed development opportunity',()=>{
+  const move=parseGame(SAMPLE_PGN).moves[11];
+  const before={...cp(-25,['f8c5']),bestmove:'a8h8'};
+  const description=describeMove(move,before,cp(88,['d3e4','d8h4']));
+  assert.match(description.text,/백 폰이 e4의 흑 폰을 잡을 수/);
+  assert.doesNotMatch(description.text,/전개할 기회|대신|비숍|체크/);
+});
+
+test('a missed immediate knight fork is explained before a speculative pawn loss seven plies later',()=>{
+  const chess=new Chess('k6r/8/2n5/8/4PPb1/5N2/P3B3/1K6 w - - 0 13');
+  const move=chess.move('Bd3');
+  const pv=['Rh7','Kb2','Rf7','Kb1','Rf6','Kb2','Rxf4'].map(san=>uciMove(chess.move(san)));
+  const description=describeMove(move,cp(200,['f3e5']),cp(0,pv));
+  assert.ok(description.grade.severity>=1);
+  assert.match(description.text,/^나이트로 두 기물을 동시에 공격할 기회를 놓쳤습니다\./);
+  assert.match(description.text,/대신 백 나이트를 f3에서 e5로 옮겨 c6의 나이트·g4의 비숍을 동시에 공격/);
+  assert.doesNotMatch(description.text,/긴 예상|7번째|f4의.*폰|Bd3|Ne5/);
+  assert.equal(description.text.split('.').filter(Boolean).length,2);
+});
+
+test('an immediate verified loss remains ahead of the same missed knight fork',()=>{
+  const chess=new Chess('k6r/8/2n5/8/4PPb1/5N2/P3B3/1K6 w - - 0 13');
+  const move=chess.move('Bd3');
+  const description=describeMove(move,cp(200,['f3e5']),cp(-100,['g4f3']));
+  assert.match(description.text,/^이 수로 인해 나이트를 지키던 비숍이 자리를 떠나/);
+  assert.match(description.text,/바로 다음 수에 흑 비숍이 f3의 백 나이트를 잡을 수/);
+  assert.match(description.text,/대신 백 나이트를 f3에서 e5로/);
+  assert.doesNotMatch(description.text,/기회를 놓쳤습니다/);
 });

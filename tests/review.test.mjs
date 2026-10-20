@@ -19,14 +19,24 @@ test('a played candidate uses the same completed root depth without another sear
   assert.deepEqual(assessedMoveResult(before,result,move).lines[0].pv,['d7d5']);
 });
 
-test('a candidate at a different depth is searched from its root with identical budget',async()=>{
+test('a candidate at a different depth is searched from its root at the completed root depth',async()=>{
   const {chess,move}=root(),before=baseline(),after={score:cp(-400),depth:14,lines:[]},calls=[];
   before.lines.push({multipv:2,score:cp(45),depth:11,pv:['g1f3','d7d5']});
-  const engine={async analyze(position,settings){calls.push({fen:position.fen(),settings});return{lines:[{multipv:1,score:cp(40),depth:13,pv:['g1f3','d7d5']}]};}};
+  const engine={async analyze(position,settings){calls.push({fen:position.fen(),settings});return{lines:[{multipv:1,score:cp(40),depth:settings.depth,pv:['g1f3','d7d5']}]};}};
   const result=await reviewMove(engine,chess,before,after,move,options);
-  assert.deepEqual(calls,[{fen:move.before,settings:{...options,multipv:1,searchMoves:['g1f3']}}]);
+  assert.deepEqual(calls,[{fen:move.before,settings:{...options,depth:12,multipv:1,searchMoves:['g1f3']}}]);
+  assert.equal(result.moveReview.depth,before.depth);
   assert.equal(result.moveReview.source,'search');assert.equal(classifyMove(before,result,move).key,'excellent');
   assert.equal(await reviewMove(engine,chess,before,result,move,options),result);assert.equal(calls.length,1);
+});
+
+test('a restricted search never exceeds a lower depth explicitly requested by the caller',async()=>{
+  const {chess,move}=root(),before=baseline(),after={score:cp(0),lines:[]};
+  let settings;
+  const engine={async analyze(position,value){settings=value;return{lines:[{score:cp(40),depth:value.depth,pv:['g1f3','d7d5']}]};}};
+  await reviewMove(engine,chess,before,after,move,{...options,depth:8});
+  assert.equal(settings.depth,8);
+  assert.equal(settings.movetime,options.movetime);
 });
 
 test('a changed root result invalidates the attached move comparison',async()=>{

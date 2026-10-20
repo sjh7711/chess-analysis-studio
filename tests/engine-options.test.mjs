@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { analysisKey, DEFAULT_PERFORMANCE, engineChunks, normalizePerformance, searchOptions, supportedThreads, workerUrl } from '../src/engine-options.js';
+import { analysisKey, DEFAULT_PERFORMANCE, engineChunks, gameReviewOptions, normalizePerformance, reviewOptions, searchOptions, supportedThreads, workerUrl } from '../src/engine-options.js';
 import { StockfishEngine } from '../src/engine.js';
 import { restoreResults } from '../src/study.js';
 
@@ -18,7 +18,31 @@ test('performance controls map to search limits and distinguish cached evaluatio
   assert.equal(DEFAULT_PERFORMANCE.reviewMode,'precise');
   assert.equal(normalizePerformance().reviewMode,'precise');
   assert.equal(normalizePerformance({reviewMode:'fast'}).reviewMode,'fast');
-  assert.match(key,/^review-v2:/);
+  assert.match(key,/^review-v3:position:/);
+});
+
+test('whole-game review limits candidates while preserving explicit position analysis and review speed settings',()=>{
+  for(const multipv of [1,2,3,5]){
+    const precise={...DEFAULT_PERFORMANCE,multipv};
+    const requested=searchOptions(16,precise);
+    assert.equal(requested.multipv,multipv);
+    assert.deepEqual(reviewOptions(16,precise),requested);
+    assert.deepEqual(gameReviewOptions(16,precise),{...requested,multipv:Math.min(2,multipv)});
+    const fast={...precise,reviewMode:'fast'};
+    assert.deepEqual(gameReviewOptions(16,fast),{...requested,multipv:Math.min(2,multipv),movetime:600});
+  }
+  assert.equal(gameReviewOptions(24,{...DEFAULT_PERFORMANCE,reviewMode:'fast',movetime:10000}).movetime,1500);
+});
+
+test('cache keys record the actual whole-game policy separately from manual candidate settings',()=>{
+  const settings={...DEFAULT_PERFORMANCE,multipv:3};
+  const position=analysisKey('full',16,settings),game=analysisKey('full',16,settings,'game');
+  assert.match(game,/^review-v3:game:full:16:1200:2:32:1$/);
+  assert.notEqual(position,game);
+  assert.equal(analysisKey('full',16,{...settings,multipv:5},'game'),game);
+  assert.notEqual(analysisKey('full',16,{...settings,multipv:5}),position);
+  assert.notEqual(analysisKey('full',16,{...settings,reviewMode:'fast'},'game'),game);
+  assert.notEqual(analysisKey('full',16,{...settings,multipv:1},'game'),game);
 });
 
 test('full-engine parts cover each WASM file and stay below static asset limits', () => {
