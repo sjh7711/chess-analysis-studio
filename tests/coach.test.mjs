@@ -760,7 +760,7 @@ test('a newly opened legal capture and settled major-piece loss adds a factual r
   assert.equal(JSON.stringify({game,before,after}),original);
 });
 
-test('an existing attack, declined threat, unfinished recapture or compensated exchange cannot invent a newly opened loss',()=>{
+test('an existing material loss is described without inventing a newly opened attack, while declined or unfinished trades stay unproven',()=>{
   const cases=[
     {fen:'kr5r/8/7b/8/4R3/8/8/K1R5 w - - 0 20',san:'Rh4',pv:['h6c1','h4h8','b8h8']},
     {fen:'kr5r/8/7b/8/8/4R3/8/K1R5 w - - 0 20',san:'Rh3',pv:['h6g7']},
@@ -768,10 +768,16 @@ test('an existing attack, declined threat, unfinished recapture or compensated e
     {fen:'kr5r/8/7b/8/8/4R3/8/K1R5 w - - 0 20',san:'Rh3',pv:['h6c1','h3h8','c1g5']},
     {fen:'kr5r/8/7b/8/8/4R3/8/K1R5 w - - 0 20',san:'Rh3',pv:['h6c1','h3h8','a8a1']},
   ];
-  for(const {fen,san,pv} of cases) {
+  for(const [index,{fen,san,pv}] of cases.entries()) {
     const move=new Chess(fen).move(san),insight=explainMove(move,cp(0,[uciMove(move),...pv]),cp(0,pv));
-    assert.equal(insight.riskFact,'');
-    assert.doesNotMatch(insight.summary,/공격길이 열려|교환 후 백이 기물 점수 5점 손해/);
+    assert.doesNotMatch(insight.summary,/공격길이 열려/);
+    if(index===0) {
+      assert.match(insight.riskFact,/c1의 백 룩/);
+      assert.match(insight.riskFact,/교환 후 백이 기물 점수 5점 손해/);
+    } else {
+      assert.equal(insight.riskFact,'');
+      assert.doesNotMatch(insight.summary,/교환 후 백이 기물 점수 5점 손해/);
+    }
   }
 });
 

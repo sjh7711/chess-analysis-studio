@@ -1,4 +1,4 @@
-import { Chess, expectedPoints, hasMoveReview, hasRankingReview, needsRankingReview, sacrificeCandidates, scoreValue, uciMove } from './chess-core.js';
+import { Chess, expectedPoints, hasMoveReview, hasRankingReview, needsRankingReview, hasMateReview, needsMateReview, sacrificeCandidates, scoreValue, uciMove } from './chess-core.js';
 import { isBookMove } from './opening-book.js';
 
 function legalBranch(fen,line,captures) {
@@ -92,12 +92,49 @@ async function reviewRanking(engine,chess,before,after,move,options) {
   return {...after,moveReview:{...review,rankingReview:evidence}};
 }
 
+async function reviewMate(engine,chess,before,after,move,options) {
+  if(!needsMateReview(before,after,move,chess) || !engine?.analyze)return after;
+  const review=after.moveReview,history=chess.history({verbose:true}),requestedDepth=Math.min(22,before.depth+4),minimumDepth=before.depth+2;
+  if(requestedDepth<minimumDepth)return after;
+  const evidence={version:1,scope:'played-mate-proof',fen:move.before,afterFen:move.after,uci:uciMove(move),configKey:before.configKey,
+    startFen:history[0]?.before||chess.fen(),historyMoves:history.map(uciMove),
+    beforeScore:{...before.score},beforeDepth:before.depth,beforeBestmove:before.bestmove,beforePv:[...before.lines.find(line=>line.multipv===1).pv],
+    childScore:{...after.score},childDepth:after.depth,childBestmove:after.bestmove,childPv:[...after.lines.find(line=>line.multipv===1).pv],
+    playedScore:{...review.score},playedDepth:review.depth,playedPv:[...review.pv],playedSource:review.source,
+    requestedDepth,minimumDepth,requestedMultipv:1,movetime:Math.min(1200,Number.isFinite(options.movetime)&&options.movetime>0?options.movetime:1200),
+    searchMoves:[uciMove(move)],status:'unverified',result:null};
+  try {
+    // A completed child can already see a forced mate while the shallower
+    // played-root search still emits centipawns. Verify that single root at a
+    // greater completed depth, leaving every primary score and PV intact.
+    await engine.reset?.();
+    const result=await engine.analyze(chess,{...options,depth:requestedDepth,movetime:evidence.movetime,multipv:1,searchMoves:[uciMove(move)]});
+    evidence.result={score:result.score&&{...result.score},depth:result.depth,bestmove:result.bestmove,
+      engineBestmove:result.engineBestmove,multipvComplete:result.multipvComplete,
+      lines:Array.isArray(result.lines)?result.lines.map(line=>({...line,score:line.score&&{...line.score},pv:Array.isArray(line.pv)?[...line.pv]:line.pv})):[]};
+    evidence.status=result.multipvComplete===true?(result.depth>=minimumDepth?'complete':'depth-limited'):'unverified';
+    const enriched={...after,moveReview:{...review,mateReview:evidence}};
+    if(hasMateReview(before,enriched,move,chess))return enriched;
+  } catch(error) {
+    if(error?.name==='AbortError')throw error;
+  }
+  // Cache a bound failed attempt without treating it as proof or retrying on
+  // every render. Aborted work propagates above and does not become a cache.
+  evidence.result=null;evidence.status='unverified';
+  return {...after,moveReview:{...review,mateReview:evidence}};
+}
+
+async function reviewConfidence(engine,chess,before,after,move,options) {
+  const ranked=await reviewRanking(engine,chess,before,after,move,options);
+  return reviewMate(engine,chess,before,ranked,move,options);
+}
+
 // Grade the played move from the same root as the engine's best move. Scores
 // from independently searched child positions are kept for the graph only.
 export async function reviewMove(engine, chess, before, after, move, options = {}) {
   if (!move || !before) return after;
   if (chess.fen()!==move.before) throw new Error('수 평가의 시작 국면이 일치하지 않습니다.');
-  if (hasMoveReview(before,after,move)) return reviewSacrifice(engine,chess,before,await reviewRanking(engine,chess,before,after,move,options),move,options);
+  if (hasMoveReview(before,after,move)) return reviewSacrifice(engine,chess,before,await reviewConfidence(engine,chess,before,after,move,options),move,options);
   const uci=uciMove(move);
   let candidate,source;
   if (after.terminal) {
@@ -127,5 +164,5 @@ export async function reviewMove(engine, chess, before, after, move, options = {
   const reviewed={...after,moveReview:{version:1,fen:move.before,uci,configKey:before.configKey,
     beforeScore:before.score,beforeDepth:before.depth,beforeBestmove:before.bestmove,
     score:candidate.score,depth:candidate.depth,pv:[...candidate.pv],source}};
-  return reviewSacrifice(engine,chess,before,await reviewRanking(engine,chess,before,reviewed,move,options),move,options);
+  return reviewSacrifice(engine,chess,before,await reviewConfidence(engine,chess,before,reviewed,move,options),move,options);
 }

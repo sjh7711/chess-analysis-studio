@@ -69,7 +69,8 @@ test('a nearby fork plays through the loss and retains its explicit timing',()=>
   assert.equal(insight.response.consequence.ply,3);
   assert.equal(insight.response.focus.length,3);
   assert.match(insight.responseFact,/동시 공격.*이어지는 응수에서 흑 나이트가 c2의 백 룩을 잡을 수 있습니다\./);
-  assert.equal(insight.riskFact,'');
+  assert.match(insight.riskFact,/동시 공격.*c2의 백 룩/);
+  assert.match(insight.riskFact,/교환 후 백이 기물 점수 5점 손해/);
 });
 
 test('full and core alternatives start before the reviewed move and cannot overwrite the response',()=>{

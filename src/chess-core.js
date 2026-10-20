@@ -125,7 +125,7 @@ export const MOVE_GRADES = Object.freeze({
   inaccuracy:{label:'부정확',symbol:'?!'}, mistake:{label:'실수',symbol:'?'},
   miss:{label:'놓친 기회',symbol:'×'}, blunder:{label:'블런더',symbol:'??'},
 });
-export const GRADING_BASIS = 'Chess.com 공개 예상 승점 감소 구간: 우수한 수 0~2%p, 좋은 수 2~5%p, 부정확 5~10%p, 실수 10~20%p, 블런더 20%p 이상. 최선의 수는 엔진 1순위 또는 같은 완료 깊이에서 동일한 평가를 받은 후보입니다. 이 앱은 경계값부터 다음 등급을 적용하며, 예상 승점 환산·특수 분류·승점이 포화된 국면의 전술 손실 보정은 자체 추정입니다. 승점 감소가 작아도 최선보다 추가 주요 기물 손실이 검증되면 실수로 분류합니다. 즉시 체크메이트를 놓치면 놓친 기회로 분류하되, 체크 후 상대의 유일한 합법 응수에 다음 수로 메이트하는 수순이 동일 깊이와 실제 대국 이력으로 검증되면 예외로 합니다. Chess.com의 레이팅별 환산식과 CAPS2 정확도 계산식은 공개되지 않아 동일한 결과를 보장하지 않습니다.';
+export const GRADING_BASIS = 'Chess.com 공개 예상 승점 감소 구간: 우수한 수 0~2%p, 좋은 수 2~5%p, 부정확 5~10%p, 실수 10~20%p, 블런더 20%p 이상. 최선의 수는 엔진 1순위 또는 같은 완료 깊이에서 동일한 평가를 받은 후보입니다. 이 앱은 경계값부터 다음 등급을 적용하며, 예상 승점 환산·특수 분류·승점이 포화된 국면의 전술 손실 보정은 자체 추정입니다. 승점 감소가 작아도 최선보다 추가 주요 기물 손실이 검증되면 실수로 분류합니다. 피할 수 있었던 상대의 즉시 메이트 또는 모든 방어가 증명된 체크 시작 메이트2 허용과, 모든 합법 응수에 검증된 체크 시작 메이트2 기회를 놓친 경우도 별도 분류합니다. 자기 즉시 메이트를 놓치면 놓친 기회로 분류하되, 체크 후 상대의 유일한 합법 응수에 다음 수로 메이트하는 수순이 동일 깊이와 실제 대국 이력으로 검증되면 예외로 합니다. 비제한 수전·수후 검색은 같은 승자의 메이트인데 실전 제한검색만 CP인 경우, 실제 이력으로 최소 2단계 더 깊은 별도 검색의 완결 메이트가 확인되면 그 실전 수 평가에만 사용합니다. 이 별도 증거가 메이트3 이상을 확인한 경우에만, 모든 방어가 증명된 조용한 메이트2 기회 누락도 판정합니다. 원래 국면 점수와 최선 순위는 바꾸지 않습니다. Chess.com의 레이팅별 환산식과 CAPS2 정확도 계산식은 공개되지 않아 동일한 결과를 보장하지 않습니다.';
 
 // Transparent approximation, not a claim to reproduce Chess.com's undisclosed rating model.
 export function expectedPoints(score, color = 'w') {
@@ -242,11 +242,129 @@ export function needsRankingReview(before,after,move,chess) {
   return rankingEligible(before,after,move) && !hasRankingReview(before,after,move,chess);
 }
 
+function copyHistoryPosition(chess) {
+  const history=chess.history({verbose:true}),copy=validatePosition(history[0]?.before||chess.fen());
+  for(const step of history){if(copy.isGameOver())return null;copy.move(uciMove(step));}
+  return copy;
+}
+
+function playedMateBranch(chess,pv) {
+  if(!chess || !Array.isArray(pv) || !pv.length)return null;
+  try {
+    const steps=[];
+    for(const uci of pv){
+      if(typeof uci!=='string' || !/^[a-h][1-8][a-h][1-8][qrbn]?$/.test(uci) || chess.isGameOver())return null;
+      const step=chess.move(uci);if(uciMove(step)!==uci)return null;steps.push(step);
+    }
+    return {chess,steps};
+  } catch { return null; }
+}
+
+function provesMate(branch,score,winner) {
+  return !!(branch && score?.type==='mate' && score.winner===winner && Number.isInteger(score.value)
+    && score.value!==0 && Math.sign(score.value)===(winner==='w'?1:-1)
+    && branch.chess.isCheckmate() && branch.chess.turn()!==winner
+    && branch.steps.filter(step=>step.color===winner).length===Math.abs(score.value));
+}
+
+function mateReviewEligible(before,after,move,chess) {
+  const review=after?.moveReview,winner=move?.color;
+  if(!hasMoveReview(before,after,move) || review.source!=='search' || review.score.type!=='cp'
+    || review.depth!==before.depth || !before.multipvComplete || !after.multipvComplete
+    || !Number.isInteger(before.depth) || before.depth<1 || !Number.isInteger(after.depth) || after.depth<before.depth
+    || Math.min(22,before.depth+4)<before.depth+2
+    || typeof before.configKey!=='string' || !before.configKey || after.configKey!==before.configKey
+    || before.score.type!=='mate' || before.score.winner!==winner || after.score.type!=='mate' || after.score.winner!==winner
+    || !legalMoveRecord(move) || missesMateInOne(move))return false;
+  const first=before.lines?.find(line=>line.multipv===1 && line.depth===before.depth
+    && line.pv?.[0]===before.bestmove && sameScore(line.score,before.score));
+  const child=after.lines?.find(line=>line.multipv===1 && line.depth===after.depth
+    && line.pv?.[0]===after.bestmove && sameScore(line.score,after.score));
+  if(!first || !child || !chess || chess.fen()!==move.before || chess.isGameOver())return false;
+  try {
+    const root=copyHistoryPosition(chess),actual=copyHistoryPosition(chess),primary=copyHistoryPosition(chess);
+    if(!root || !actual || !primary)return false;
+    const best=playedMateBranch(root,first.pv);
+    actual.move(uciMove(move));if(actual.fen()!==move.after || actual.isGameOver())return false;
+    return provesMate(best,before.score,winner) && provesMate(playedMateBranch(actual,child.pv),after.score,winner)
+      && !!playedMateBranch(primary,review.pv);
+  } catch { return false; }
+}
+
+const mateReviewCache=new WeakMap();
+function mateReviewValidation(before,after,move) {
+  if(!before || !after || !move)return null;
+  const review=after.moveReview,record=review?.mateReview;if(!record)return null;
+  const signature=gradingEvidenceSignature(before,after,move),cached=mateReviewCache.get(move);
+  if(cached?.before===before && cached.after===after && cached.signature===signature)return cached;
+  let valid=false,consumable=null,history=[];
+  try {
+    const root=rankingRoot(record),first=before.lines?.find(line=>line.multipv===1),child=after.lines?.find(line=>line.multipv===1);
+    const samePv=(a,b)=>Array.isArray(a)&&Array.isArray(b)&&a.length===b.length&&a.every((uci,index)=>uci===b[index]);
+    if(record.version===1 && record.scope==='played-mate-proof' && record.fen===move.before && record.afterFen===move.after
+      && record.uci===uciMove(move) && record.configKey===before.configKey
+      && record.beforeDepth===before.depth && record.beforeBestmove===before.bestmove && sameScore(record.beforeScore,before.score)
+      && samePv(record.beforePv,first?.pv) && record.childDepth===after.depth && record.childBestmove===after.bestmove
+      && sameScore(record.childScore,after.score) && samePv(record.childPv,child?.pv)
+      && record.playedDepth===review.depth && record.playedSource===review.source && sameScore(record.playedScore,review.score)
+      && samePv(record.playedPv,review.pv) && record.requestedDepth===Math.min(22,before.depth+4)
+      && record.minimumDepth===before.depth+2 && record.requestedMultipv===1
+      && samePv(record.searchMoves,[uciMove(move)]) && Number.isFinite(record.movetime) && record.movetime>0 && record.movetime<=1200
+      && ['complete','depth-limited','unverified'].includes(record.status) && root && mateReviewEligible(before,after,move,root)) {
+      history=root.history({verbose:true});
+      if(record.status==='unverified')valid=record.result===null;
+      else {
+        const result=record.result,line=result?.lines?.find(item=>item.multipv===1);
+        if(Number.isInteger(result?.depth) && result.depth>0 && result.lines.length===1 && line
+          && line.depth===result.depth && result.bestmove===uciMove(move) && line.pv?.[0]===uciMove(move)
+          && sameScore(line.score,result.score) && ['cp','mate'].includes(result.score?.type) && Number.isFinite(result.score.value)) {
+          const branch=playedMateBranch(root,line.pv),complete=!!result.multipvComplete && result.depth>=record.minimumDepth;
+          const legal=!!branch && (result.score.type==='mate'?provesMate(branch,result.score,move.color):!branch.chess.isCheckmate());
+          valid=legal && (record.status==='complete'?complete:!complete);
+          if(valid && complete && provesMate(branch,result.score,move.color))consumable=result;
+        }
+      }
+    }
+  } catch { /* Stale, partial or history-inconsistent evidence is not consumed. */ }
+  const result={before,after,signature,valid,consumable,history};mateReviewCache.set(move,result);return result;
+}
+
+function sameMateReviewHistory(entry,move,context) {
+  if(!context)return true;
+  const record=entry.after.moveReview.mateReview;
+  if(typeof context.history==='function')return sameRankingHistory(record,context);
+  if(context.moves===undefined && context.moveIndex===undefined)return true;
+  const {moves,moveIndex}=context;
+  return Array.isArray(moves) && Number.isInteger(moveIndex) && moveIndex>=0 && moveIndex<moves.length
+    && record.startFen===(moves[0]?.before||move.before) && entry.history.length===moveIndex
+    && moves[moveIndex]?.before===move.before && moves[moveIndex]?.after===move.after && uciMove(moves[moveIndex])===uciMove(move)
+    && entry.history.every((step,index)=>moves[index]?.before===step.before && moves[index]?.after===step.after
+      && uciMove(moves[index])===uciMove(step));
+}
+
+// The original position and played-only records remain immutable. Optional
+// deeper proof repairs a mate/CP horizon conflict only for this played root.
+export function hasMateReview(before,after,move,chess) {
+  const entry=mateReviewValidation(before,after,move);
+  return !!(entry?.valid && sameMateReviewHistory(entry,move,chess));
+}
+
+export function validatedMateReview(before,after,move,chess) {
+  const entry=mateReviewValidation(before,after,move);
+  return entry?.valid && sameMateReviewHistory(entry,move,chess)?entry.consumable:null;
+}
+
+export function needsMateReview(before,after,move,chess) {
+  if(hasMateReview(before,after,move,chess))return false;
+  try {return mateReviewEligible(before,after,move,chess||validatePosition(move.before));}
+  catch {return false;}
+}
+
 // A root-restricted search includes the played move. Convert its PV and mate
 // distance to the resulting position before building explanations/replays.
-export function assessedMoveResult(before, after, move) {
+export function assessedMoveResult(before, after, move, context) {
   if (!hasMoveReview(before,after,move)) return after;
-  const review=after.moveReview;
+  const proof=validatedMateReview(before,after,move,context),review=proof?{...proof,pv:proof.lines[0].pv}:after.moveReview;
   let score=review.score;
   if (score.type==='mate' && score.winner===move.color) score={...score,value:Math.sign(scoreValue(score))*Math.max(0,Math.abs(score.value)-1)};
   const pv=review.pv.slice(1);
@@ -398,7 +516,7 @@ function gradingEvidenceSignature(before,after,move) {
     before:[before.score,before.depth,before.bestmove,before.configKey,before.multipvComplete,before.lines],
     child:[after.score,after.depth,after.bestmove,after.configKey,after.multipvComplete,after.lines],
     review:review&&[review.version,review.fen,review.uci,review.configKey,review.beforeScore,review.beforeDepth,
-      review.beforeBestmove,review.score,review.depth,review.pv,review.source,review.rankingReview]});
+      review.beforeBestmove,review.score,review.depth,review.pv,review.source,review.rankingReview,review.mateReview]});
 }
 
 function rootEvidence(before,after,move,signature=gradingEvidenceSignature(before,after,move)) {
@@ -704,6 +822,104 @@ function childSearchContradictsGreat(before,after,move) {
   } catch { return false; }
 }
 
+const shortMateEvidenceCache=new WeakMap();
+function mateTwoCertificates(position,first,checkingOnly=true) {
+  const chess=copyHistoryPosition(position);if(!chess || chess.isGameOver())return null;
+  try {
+    if(typeof first!=='string' || !/^[a-h][1-8][a-h][1-8][qrbn]?$/.test(first))return null;
+    chess.move(first);if(checkingOnly && !chess.isCheck() || chess.isGameOver())return null;
+    const certificates=[];
+    for(const defense of chess.moves({verbose:true})) {
+      chess.move(uciMove(defense));
+      const finish=!chess.isGameOver()&&chess.moves({verbose:true}).find(step=>step.san.endsWith('#'));
+      chess.undo();if(!finish)return null;
+      certificates.push({reply:uciMove(defense),finish:uciMove(finish)});
+    }
+    return certificates.length?certificates:null;
+  } catch {return null;}
+}
+
+function shortMateEvidence(before,after,move,moves,moveIndex,signature) {
+  const review=after.moveReview,winner=move.color,enemy=winner==='w'?'b':'w';
+  const allowedDistance=review?.score?.type==='mate'?Math.abs(review.score.value):0;
+  const allowsMate=before.score.type==='cp' && expectedPoints(before.score,winner)<=.15
+    && review?.score?.type==='mate' && review.score.winner===enemy
+    && [1,2].includes(allowedDistance) && review.score.value===(enemy==='w'?allowedDistance:-allowedDistance)
+    && review.pv?.length===2*allowedDistance;
+  const confirmedLonger=before.score.type==='mate' && Math.abs(before.score.value)===2 && review?.score?.type==='cp'
+    ?validatedMateReview(before,after,move,{moves,moveIndex}):null;
+  const extendedMate=confirmedLonger && Math.abs(confirmedLonger.score.value)>=3;
+  const missesMate=before.score.type==='mate' && before.score.winner===winner
+    && before.score.value===(winner==='w'?2:-2) && review?.score?.type==='cp'
+    && (after.score.type==='cp' && Number.isFinite(after.score.value) || extendedMate)
+    && after.multipvComplete && after.configKey===before.configKey && Number.isInteger(after.depth) && after.depth>=before.depth;
+  if(!allowsMate && !missesMate)return null;
+  const first=before.lines?.find(line=>line.multipv===1 && line.depth===before.depth
+    && line.pv?.[0]===before.bestmove && sameScore(line.score,before.score));
+  if(!first || !before.multipvComplete || !Number.isInteger(before.depth) || before.depth<1
+    || typeof before.configKey!=='string' || !before.configKey || before.bestmove===uciMove(move)
+    || !hasMoveReview(before,after,move) || review.depth!==before.depth
+    || !['candidate','search'].includes(review.source) || !legalMoveRecord(move)
+    || !Array.isArray(moves) || !Number.isInteger(moveIndex) || moveIndex<0 || moveIndex>=moves.length)return null;
+  const historySignature=JSON.stringify(moves.slice(0,moveIndex+1).map(step=>
+    [step?.before,step?.after,step?.from,step?.to,step?.promotion]));
+  const cached=shortMateEvidenceCache.get(move);
+  if(cached?.before===before && cached.after===after && cached.moves===moves && cached.moveIndex===moveIndex
+    && cached.signature===signature && cached.historySignature===historySignature)return cached.result;
+  const result=(()=>{
+    try {
+      const current=moves[moveIndex];
+      if(current?.before!==move.before || current.after!==move.after || uciMove(current)!==uciMove(move))return null;
+      const root=()=>{
+        const chess=validatePosition(moves[0]?.before||move.before);
+        for(const step of moves.slice(0,moveIndex)) {
+          if(chess.isGameOver() || chess.fen()!==step.before || chess.move(uciMove(step)).after!==step.after)return null;
+        }
+        return chess.fen()===move.before && !chess.isGameOver()?chess:null;
+      };
+      const replay=pv=>playedMateBranch(root(),pv)?.chess||null;
+      const position=root();if(!position || position.moves().length===1)return null;
+      const playedEnd=replay(review.pv),bestEnd=replay(first.pv);
+      if(!playedEnd || !bestEnd)return null;
+      const matingMoves=chess=>chess.isGameOver()?[]:chess.moves({verbose:true}).filter(step=>step.san.endsWith('#'));
+      if(allowsMate) {
+        if(!playedEnd.isCheckmate() || playedEnd.turn()!==winner)return null;
+        position.move(uciMove(move));if(position.fen()!==move.after || position.isGameOver())return null;
+        const finishes=matingMoves(position);
+        const alternative=root();alternative.move(before.bestmove);
+        if(alternative.isGameOver() || matingMoves(alternative).length)return null;
+        if(allowedDistance===1)return finishes.length?{version:1,kind:'allowed-mate-in-one',finishes:finishes.map(uciMove),alternative:before.bestmove}:null;
+        const certificates=mateTwoCertificates(position,review.pv[1]);if(!certificates)return null;
+        // The alternative must avoid every checking mate in two, rather than
+        // merely avoid the attacker's selected continuation from the PV.
+        for(const attack of alternative.moves({verbose:true})) {
+          if(attack.san.endsWith('+') && mateTwoCertificates(alternative,uciMove(attack)))return null;
+        }
+        return {version:1,kind:'allowed-mate-in-two',first:review.pv[1],certificates,alternative:before.bestmove};
+      }
+      // Prove mate in two over every legal defender reply, not merely the
+      // selected PV. Quiet setups require independent longer-mate proof;
+      // the original CP/CP rule remains restricted to checking setups.
+      if(first.pv.length!==3 || !bestEnd.isCheckmate() || bestEnd.turn()===winner || playedEnd.isCheckmate())return null;
+      const certificates=mateTwoCertificates(position,before.bestmove,!extendedMate);if(!certificates)return null;
+      const checkingStart=position.move(before.bestmove).san.endsWith('+');
+      const actual=root();actual.move(uciMove(move));if(actual.fen()!==move.after || actual.isGameOver())return null;
+      const escape=actual.moves({verbose:true}).find(defense=>{
+        actual.move(uciMove(defense));const finished=actual.isCheckmate() && actual.turn()!==winner;
+        const preserves=finished || !actual.isGameOver() && matingMoves(actual).length>0;actual.undo();return !preserves;
+      });
+      const child=after.lines?.find(line=>line.multipv===1 && line.depth===after.depth
+        && line.pv?.[0]===after.bestmove && sameScore(line.score,after.score));
+      if(!escape || !child)return null;
+      for(const uci of child.pv){if(actual.isGameOver())return null;actual.move(uci);}
+      if(actual.isCheckmate() && !extendedMate)return null;
+      return {version:1,kind:'missed-verified-mate-in-two',first:before.bestmove,certificates,escapingDefense:uciMove(escape),checkingStart};
+    } catch { return null; }
+  })();
+  shortMateEvidenceCache.set(move,{before,after,moves,moveIndex,signature,historySignature,result});
+  return result;
+}
+
 export function classifyMove(before, after, move, {previous,previousMove,previousGrade,moves,moveIndex} = {}) {
   if (!before || !after || !move) return null;
   // History arrays can be edited in place during exploration. Cache the
@@ -713,11 +929,14 @@ export function classifyMove(before, after, move, {previous,previousMove,previou
   const signature=gradingEvidenceSignature(before,after,move);
   const mateMiss=missesMateInOne(move) && !verifiedForcingMateContinuation(before,after,move,moves,moveIndex,signature),
     candidate=verifiedTopCandidate(before,move,after,signature);
+  const shortMate=shortMateEvidence(before,after,move,moves,moveIndex,signature);
+  const mateProof=validatedMateReview(before,after,move,{moves,moveIndex});
   const cached = gradeCache.get(move);
   if (cached?.before===before && cached.after===after && cached.previous===previous
     && cached.previousMove===previousMove && cached.previousGrade===previousGrade && cached.recapture===recapture
-    && cached.mateMiss===mateMiss && cached.candidate===candidate && cached.signature===signature) return cached.grade;
-  const assessed=assessedMoveResult(before,after,move);
+    && cached.mateMiss===mateMiss && cached.candidate===candidate && cached.shortMate===shortMate
+    && cached.mateProof===mateProof && cached.signature===signature) return cached.grade;
+  const assessed=assessedMoveResult(before,after,move,{moves,moveIndex});
   const sign = move.color === 'w' ? 1 : -1;
   let loss;
   if (before.score.type === 'mate' && assessed.score.type === 'mate' && Math.sign(scoreValue(before.score)) === Math.sign(scoreValue(assessed.score))) loss = 0;
@@ -750,13 +969,21 @@ export function classifyMove(before, after, move, {previous,previousMove,previou
   } else if (pointsLoss<0.05 && isBookMove(move)) {
     key='book'; reason='등록된 오프닝 수순에 있는 이론 수입니다.';
   }
+  const mateEvidence=!['miss','mistake','blunder'].includes(key)?shortMate:null;
+  if(mateEvidence) {
+    key=mateEvidence.kind.startsWith('allowed-mate')?'mistake':'miss';severity=Math.max(2,severity);
+    reason=key==='mistake'?(mateEvidence.kind==='allowed-mate-in-one'?'다른 수로 피할 수 있었던 상대의 한 수 체크메이트를 허용했습니다.'
+      :'다른 수로 피할 수 있었지만, 상대가 체크로 시작해 모든 합법 응수에 다음 수로 메이트할 수 있게 했습니다.')
+      :mateEvidence.checkingStart===false?'상대의 모든 합법 응수에 다음 수로 메이트할 수 있었지만, 그 마무리를 놓쳤습니다.'
+        :'체크로 시작해 상대의 모든 합법 응수에 다음 수로 메이트할 수 있었지만, 그 마무리를 놓쳤습니다.';
+  }
   const tacticalLoss=['excellent','good','inaccuracy'].includes(key)?saturatedTacticalLoss(before,after,move,signature):null;
   if(tacticalLoss) {
     key='mistake';severity=Math.max(2,severity);
     reason=`가까운 예상 교환에서 최선의 수보다 기물 점수를 ${tacticalLoss.additional}점 더 내줄 수 있습니다.`;
   }
-  const grade={key,...MOVE_GRADES[key],loss,pointsLoss,severity,reason,...(tacticalLoss?{tacticalLoss}:{})};
-  gradeCache.set(move,{before,after,previous,previousMove,previousGrade,recapture,mateMiss,candidate,signature,grade});
+  const grade={key,...MOVE_GRADES[key],loss,pointsLoss,severity,reason,...(mateEvidence?{mateEvidence}:{}),...(tacticalLoss?{tacticalLoss}:{})};
+  gradeCache.set(move,{before,after,previous,previousMove,previousGrade,recapture,mateMiss,candidate,shortMate,mateProof,signature,grade});
   return grade;
 }
 

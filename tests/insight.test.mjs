@@ -62,11 +62,11 @@ test('missing, illegal and mismatched PVs cannot invent a continuation',()=>{
   assert.deepEqual(explainMistake(move,cp(0,['d2d4']),stale).response.pv,['c7c5']);
 });
 
-test('losing a forced mate is distinct from being mated',()=>{
+test('missing a legally verified mate in one is distinct from being mated',()=>{
   const chess=new Chess('7k/8/5KQ1/8/8/8/8/8 w - - 0 1');
   const move=chess.move('g6g4');
   const explanation=explainMistake(move,mate(1,'w',['g6g7']),cp(0,['h8h7']));
-  assert.match(explanation.reason,/가능했던 강제 체크메이트 수순을 놓쳤습니다/);
+  assert.match(explanation.reason,/한 수에 끝낼 수 있는 체크메이트 기회를 놓쳤습니다/);
   assert.doesNotMatch(explanation.reason,/허용/);
   assert.equal(explanation.lossText,'메이트 평가 변화');
 });
