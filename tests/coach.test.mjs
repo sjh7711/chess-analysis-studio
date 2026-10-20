@@ -24,10 +24,8 @@ test('Nf3 develops and attacks e5, while d6 defends that attacked pawn',()=>{
   const knight=at(2,'w'),pawn=at(2,'b');
   const development=describeMove(knight,cp(30,[uciMove(knight)]),cp(30));
   assert.equal(development.grade.key,'book');
-  assert.match(development.text,/나이트를 중앙 쪽으로 전개/);
-  assert.match(development.text,/e5의 폰을 공격/);
-  assert.match(development.text,/d4 칸도 제어/);
-  assert.match(describeMove(pawn,cp(30),cp(59)).text,/공격받던 e5의 폰을 지킵니다/);
+  assert.match(development.text,/e5의 폰을 공격하고 d4 칸도 제어하며 나이트를 전개/);
+  assert.match(describeMove(pawn,cp(30),cp(59)).text,/e5의 폰을 뒷받침하고 c8의 비숍이 나올 길/);
 });
 
 test('a truncated capture line with a possible recapture does not claim a settled pawn loss',()=>{
@@ -68,7 +66,7 @@ test('a knight developed to the edge is not described as central development',()
   const chess=new Chess('4k3/8/8/8/2p5/8/8/1N2K3 w - - 0 4');
   const move=chess.move('Na3');
   const comment=describeMove(move,null,null);
-  assert.match(comment.text,/나이트를 전개하며 c4의 폰을 공격/);
+  assert.match(comment.text,/c4의 폰을 공격하며 나이트를 전개/);
   assert.doesNotMatch(comment.text,/중앙/);
 });
 
@@ -152,8 +150,8 @@ test('brilliant offers explain the current board purpose without inventing their
     {fen:'b2r3r/k4p1p/p2q1np1/Np1P4/3p1Q2/P4PPB/1PP4P/1K2R3 w - - 0 25',san:'Re7+',reply:'a7b6',purpose:/^백 룩이 e1에서 e7로 이동해 상대 왕을 체크합니다\./},
     {fen:'3r3r/Rb3p1p/p4np1/1p1q4/kP6/P1Q2PPB/2P4P/1K6 w - - 2 30',san:'Rxb7',reply:'d5c4',purpose:/^백 룩이 b7의 흑 비숍을 잡습니다\./},
     {fen:'3r3r/1R3p1p/Q5p1/1p6/1kq5/5PPB/2P4P/1K6 w - - 0 33',san:'c3+',reply:'b4b3',purpose:/^백 폰이 c2에서 c3로 이동해 상대 왕을 체크합니다\./},
-    {fen:'3r3r/1R3p1p/6p1/1p6/2q5/5PPB/1Q5P/1K1k4 w - - 4 36',san:'Bf1',reply:'d1e1',purpose:/^비숍을 h3에서 f1로 옮겨 c4의 퀸을 공격합니다\./},
-    {fen:'7r/1R3p1p/6p1/1p6/2q5/5PP1/1Q1r3P/1K1k1B2 w - - 6 37',san:'Rd7',reply:'d1e1',purpose:/^룩을 b7에서 d7로 옮겨 d2의 룩을 공격합니다\./},
+    {fen:'3r3r/1R3p1p/6p1/1p6/2q5/5PPB/1Q5P/1K1k4 w - - 4 36',san:'Bf1',reply:'d1e1',purpose:/^c4의 퀸을 공격합니다\./},
+    {fen:'7r/1R3p1p/6p1/1p6/2q5/5PP1/1Q1r3P/1K1k1B2 w - - 6 37',san:'Rd7',reply:'d1e1',purpose:/^d2의 룩을 공격합니다\./},
   ];
   for (const {fen,san,reply,purpose} of positions) {
     const chess=new Chess(fen),move=chess.move(san),response=chess.move(reply);
@@ -161,9 +159,9 @@ test('brilliant offers explain the current board purpose without inventing their
     const description=describeMove(move,cp(0,[uciMove(move)]),cp(0,[reply]));
     assert.equal(description.grade.key,'brilliant',san);
     assert.match(description.text,purpose,san);
-    assert.match(description.text,/기물을 내줄 수 있는 수지만/);
+    assert.match(description.grade.reason,/기물을 내줄 수 있는 수지만/,'the separate grading evidence is retained');
     assert.doesNotMatch(description.text,/기물을 희생하면서|흑 (?:퀸|룩|비숍|나이트|폰)[이가].*잡습니다|상대가.*잡습니다|강제로|반드시/);
-    assert.equal(description.text.split('.').filter(Boolean).length,2);
+    assert.equal(description.text.split('.').filter(Boolean).length,1);
   }
 });
 
@@ -175,9 +173,9 @@ test('great moves lead with the verified tactic rather than the grading terminol
   ]};
   const description=describeMove(move,before,cp(0));
   assert.equal(description.grade.key,'great');
-  assert.match(description.text,/^나이트를 f3에서 e5로 옮겨 c6의 퀸·g4의 룩을 동시에 공격합니다\./);
-  assert.match(description.text,/다른 후보보다 예상 승점을 크게 지키는/);
-  assert.doesNotMatch(description.text,/희생|기물을 내줄/);
+  assert.match(description.text,/^c6의 퀸·g4의 룩을 동시에 공격합니다\./);
+  assert.match(description.grade.reason,/다른 후보보다 예상 승점을 크게 지키는/);
+  assert.doesNotMatch(description.text,/희생|기물을 내줄|예상 승점|다른 후보/);
 });
 
 function acceptedSacrificeFixture() {
@@ -211,7 +209,7 @@ test('the lightbulb explains a good quiet move and offers manual defence explora
   const line=createInsightLine({game,index:1,insight,before,after},'response');
   assert.equal(line.cursor,0);
   assert.equal(line.base.fen(),move.after);
-  assert.match(line.steps[0].explanation,/흑 폰이 e7에서 e5로 이동/);
+  assert.match(line.steps[0].explanation,/중앙에 폰을 세워 d4 칸을 제어/);
   assert.doesNotMatch(line.steps[0].explanation,/세로로 2칸|이제 백 차례/);
   assert.equal(JSON.stringify(game),original);
 });
@@ -222,7 +220,7 @@ test('a verified acceptance example has its own score, a short core, and no effe
   assert.equal(insight.grade.key,'brilliant');
   assert.deepEqual(insight.response.pv,['a7b6']);
   assert.match(insight.sacrificeFact,/이 예시에서는/);
-  assert.match(insight.sacrificeFact,/나이트.*상대 왕을 체크/);
+  assert.match(insight.sacrificeFact,/체크하면서 e7의 퀸·d8의 룩도 겨냥/);
   assert.match(insight.sacrificeFact,/e7의 흑 퀸을 잡습니다/);
   const core=createInsightLine({...context,insight},'sacrifice');
   const full=createInsightLine({...context,insight},'sacrifice','full');
@@ -243,7 +241,7 @@ test('a verified acceptance example has its own score, a short core, and no effe
   assert.match(core.startLabel,/희생 수락을 가정한 예시/);
   assert.match(core.focusNote,/상대가 이 포획을 선택한 경우의 예시/);
   assert.doesNotMatch(core.focusNote,/최선의 방어 수순과 다르/);
-  assert.match(core.steps[1].explanation,/킹·e7의 퀸을 동시에 공격/);
+  assert.match(core.steps[1].explanation,/체크하면서 e7의 퀸·d8의 룩도 겨냥/);
   assert.doesNotMatch(core.steps[1].explanation,/L자로|이제 흑 차례/);
   assert.equal(core.seek(4).get('e7').type,'n');
   assert.equal(defence.cursor,0);

@@ -1,4 +1,4 @@
-import { Chess, parseGame, gameAt, classifyMove, hasMoveReview, assessedMoveResult, MOVE_GRADES, GRADING_BASIS, formatScore, scoreValue, pvToSan, exportPgn } from './chess-core.js';
+import { Chess, parseGame, gameAt, positionCommand, classifyMove, hasMoveReview, assessedMoveResult, MOVE_GRADES, GRADING_BASIS, formatScore, scoreValue, pvToSan, exportPgn } from './chess-core.js';
 import { StockfishEngine } from './engine.js';
 import { reviewMove } from './review.js';
 import { ENGINES, DEFAULT_ENGINE_ID, REVIEW_ENGINE_ID, AUTO_THREAD_LABEL, availableReviewWorkers, automaticThreads, engineId, normalizePerformance, searchOptions, reviewOptions, gameReviewOptions, analysisKey } from './engine-options.js';
@@ -7,7 +7,8 @@ import { pieceSvg, pieceSnapshot, pieceTransitions, StepNavigation, capturedPiec
 import { BoardAnnotations } from './annotations.js';
 import { SAMPLE_PGN } from './sample.js';
 import { AnalysisLine, PlaybackClock, PIECE_NAMES, cloneChess, editedPosition, materialBalance, exportLine, restoreResults, moveText } from './study.js';
-import { createInsightLine, describeMove, explainMove, refineInsight, moveLabel, moveTurn } from './insight.js';
+import { createInsightLine, describeMove, describeHumanMove, explainMove, refineInsight, moveLabel, moveTurn } from './insight.js';
+import { humanRecommendation } from './human-recommendation.js';
 import { ExplanationSearch, explanationOptions } from './explanation-search.js';
 import { mergeExplanationLine } from './explanation-playback.js';
 import { completionAlerts } from './notification-center.js';
@@ -20,6 +21,7 @@ const STORAGE = 'chessreview.v1';
 const LIBRARY = 'chessreview.library.v1';
 let removedGame = null, exportFilename = 'chess-review.pgn', insightContext = null, insightMarkup = '', recommendationMarkup = '';
 let coachCache=null, coachExpanded=null;
+let humanChoiceCache=null, recommendationShown=null;
 const explanationSearch=new ExplanationSearch();
 let moveListScroll=0, restoreMoveListScroll=false;
 let renderedBoard=null, renderedFlipped=false, editorPieceId=0;
@@ -303,7 +305,7 @@ function renderBoard() {
 
 function renderArrow() {
   const arrow = $('best-arrow');
-  const move = shownResult()?.bestmove;
+  const move = currentHumanChoice()?.line.pv[0] || shownResult()?.bestmove;
   const nextStep = state.line?.steps[state.line.cursor];
   const arrowMove = state.line?.kind === 'pv' ? nextStep?.uci : move;
   if (state.editor || !$('show-arrow').checked || !arrowMove || !/^[a-h][1-8][a-h][1-8]/.test(arrowMove) || (state.selected && state.selected !== arrowMove.slice(0,2))) { arrow.setAttribute('visibility','hidden'); return; }
@@ -313,6 +315,18 @@ function renderArrow() {
   arrow.setAttribute('x1',x1); arrow.setAttribute('y1',y1);
   arrow.setAttribute('x2',x2-(x2-x1)*17/length); arrow.setAttribute('y2',y2-(y2-y1)*17/length);
   arrow.setAttribute('visibility','visible');
+}
+
+function currentHumanChoice() {
+  if(state.editor)return null;
+  const result=shownResult(),cursor=state.line?.cursor??state.index;
+  if(humanChoiceCache?.game===state.game && humanChoiceCache.line===state.line
+    && humanChoiceCache.cursor===cursor && humanChoiceCache.result===result)return humanChoiceCache.choice;
+  const chess=currentChess(),selection=humanRecommendation(chess,result);
+  const choice=selection && {...selection,description:describeHumanMove(selection.move,
+    {previousMove:chess.history({verbose:true}).at(-1)})||selection.reason};
+  humanChoiceCache={game:state.game,line:state.line,cursor,result,choice};
+  return choice;
 }
 
 function renderCoach() {
@@ -405,9 +419,21 @@ function renderAnalysis() {
   $('progress-bar').value = doneTasks;
   $('analysis-progress').title='국면 분석과 수 검토의 완료 작업 수입니다. 작업별 소요 시간은 다를 수 있습니다.';
   $('pv-lines').style.setProperty('--pv-columns',Math.min(performanceOptions.multipv,3));
+  const choice=currentHumanChoice();
+  $('human-recommendation').hidden=!choice;
+  if(choice) {
+    $('human-move').textContent=`${choice.move.san} · `;
+    $('human-reason').textContent=choice.description;
+    $('human-basis').textContent=choice.isEngineBest?'엔진 최선도 같은 수입니다.'
+      :`엔진 최선과 평가 차이 ${(choice.lossCp/100).toFixed(2)} · 목적이 분명한 후보를 먼저 보여줍니다.`;
+  }
   if (result?.lines?.length) {
-    const fen = currentChess().fen();
-    const markup = result.lines.map((line,i) => {
+    const chess=currentChess(),fen=chess.fen();
+    const rows=result.lines.map((line,index)=>({line,index}));
+    if(choice)rows.sort((a,b)=>Number(b.line===choice.line)-Number(a.line===choice.line));
+    recommendationShown={game:state.game,line:state.line,cursor:state.line?.cursor??state.index,
+      history:positionCommand(chess),result,rows:new Map(rows.map(item=>[item.index,item.line]))};
+    const markup = rows.map(({line,index:i}) => {
       const position = new Chess(fen);
       const number = position.moveNumber();
       let move, reply;
@@ -419,10 +445,13 @@ function renderAnalysis() {
       const moveLabel = `${PIECE_NAMES[move.piece]} ${move.from} ${move.captured ? '×' : '→'} ${move.to}${move.promotion ? ` · ${PIECE_NAMES[move.promotion]} 승격` : ''}`;
       const score = displayScore(line.score);
       const squares = `${move.from} ${move.captured ? '×' : '→'} ${move.to}${move.promotion ? `=${move.promotion.toUpperCase()}` : ''}`;
-      return `<button class="pv-row${i === 0 ? ' pv-best' : ''}" data-pv="${i}" aria-label="${escape(`${i+1}순위 ${move.color === 'w' ? '백' : '흑'} ${moveLabel}, ${evaluationSide()} 기준 평가 ${score}, 전체 예상 수순 탐색`)}" title="${escape(`${moveLabel} · ${pvToSan(fen,line.pv)}`)} · 깊이 ${line.depth}"><span class="pv-number">${i+1}</span><span class="pv-score">${score}</span><span class="pv-move"><span class="pv-piece">${pieceSvg(move.piece,move.color)}</span><strong>${escape(squares)}</strong></span><span class="pv-reply">${escape(replyText)}</span><span class="pv-play">전체 수순 보기</span></button>`;
+      const recommended=line===choice?.line,label=recommended?'추천':`엔진 ${i+1}`;
+      const accessibleLabel=recommended?`이해하기 쉬운 추천 · 엔진 ${i+1}순위`:`엔진 ${i+1}순위`;
+      return `<button class="pv-row${recommended || !choice && i===0 ? ' pv-best' : ''}${recommended?' pv-human':''}" data-pv="${i}" aria-label="${escape(`${accessibleLabel} ${move.color === 'w' ? '백' : '흑'} ${moveLabel}, ${evaluationSide()} 기준 평가 ${score}, 전체 예상 수순 탐색`)}" title="${escape(`${recommended?'이해하기 쉬운 추천 · ':''}엔진 ${i+1}순위 · ${moveLabel} · ${pvToSan(fen,line.pv)}`)} · 깊이 ${line.depth}"><span class="pv-number">${label}</span><span class="pv-score">${score}</span><span class="pv-move"><span class="pv-piece">${pieceSvg(move.piece,move.color)}</span><strong>${escape(squares)}</strong></span><span class="pv-reply">${escape(replyText)}</span><span class="pv-play">전체 수순 보기</span></button>`;
     }).join('');
     setRecommendationContent(markup);
   } else {
+    recommendationShown=null;
     const markup=`<p class="empty-text">${escape(result?.terminal || (state.line?.explanationSnapshot ? '이 장면의 추천 수는 현재 국면 재분석으로 확인하세요.' : state.mode === 'full' ? '이 국면의 분석 차례를 기다리고 있습니다.' : state.error || '분석 중 · 완료 후 추천 수를 표시합니다.'))}</p>`;
     setRecommendationContent(markup);
   }
@@ -735,14 +764,18 @@ function startExploration() {
 }
 
 function startPv(index) {
-  const result = shownResult();
-  const recommendation = result?.lines[index];
+  const shown=recommendationShown,chess=currentChess();
+  if(!shown || shown.game!==state.game || shown.line!==state.line || shown.cursor!==(state.line?.cursor??state.index)
+    || shown.history!==positionCommand(chess))return;
+  // Use exactly the displayed candidate even if a background result arrived
+  // before the next paint. The displayed index is the original engine index.
+  const recommendation = shown.rows.get(index);
   if (!recommendation) return;
-  const line = new AnalysisLine(currentChess(),recommendation.pv,currentResult());
+  const line = new AnalysisLine(chess,recommendation.pv,shown.result);
   if (!line.steps.length) { toast('재생 가능한 추천 수순이 없습니다.',true); return; }
   line.seek(1);
   line.kind = 'pv';
-  line.title = '추천 수 · 전체 예상 수순';
+  line.title = '선택한 추천 수 · 전체 예상 수순';
   line.sourceScore = recommendation.score;
   line.sourceDepth = recommendation.depth;
   pausePlayback(); stopJob();

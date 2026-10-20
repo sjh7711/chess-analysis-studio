@@ -220,12 +220,16 @@ main{container-type:inline-size}
 .recommendation-heading{display:flex;align-items:center;justify-content:space-between;margin-bottom:7px}
 .recommendation-heading h3{font-size:12px;margin:0;color:#38533e}
 .recommendation-heading>span{font-size:10px;color:#71806c}
+.human-recommendation{margin:0 0 8px;padding:8px 10px;border-left:3px solid var(--ui-accent-border);background:var(--ui-highlight);border-radius:4px;color:var(--ui-text)}
+.human-recommendation p{margin:0;font-size:12px;line-height:1.6;overflow-wrap:anywhere}
+.human-recommendation small{display:block;margin-top:3px;font-size:10px;line-height:1.5;color:var(--ui-muted)}
+.human-recommendation[hidden]{display:none}
 .moves-card #pv-lines{--pv-width:calc((100% - (var(--pv-columns,3) - 1)*6px)/var(--pv-columns,3));grid-template-columns:repeat(var(--pv-columns,3),var(--pv-width));grid-auto-flow:column;grid-auto-columns:var(--pv-width);grid-template-rows:110px;gap:6px;height:118px;align-content:start;overflow-x:auto;overflow-y:hidden;scrollbar-width:thin}
 .moves-card #pv-lines>.empty-text{grid-column:1/-1;margin:0;align-self:start}
-.moves-card .pv-row{display:grid;grid-template-columns:18px minmax(0,1fr);grid-template-rows:20px 25px 16px 16px;align-content:center;gap:3px 4px;min-width:0;padding:8px;border:1px solid #e2e8da;border-radius:6px;text-align:left;background:#f8faf5}
+.moves-card .pv-row{display:grid;grid-template-columns:42px minmax(0,1fr);grid-template-rows:20px 25px 16px 16px;align-content:center;gap:3px 4px;min-width:0;padding:8px;border:1px solid #e2e8da;border-radius:6px;text-align:left;background:#f8faf5}
 .moves-card .pv-row.pv-best{background:#edf3e4;border-color:#c4d4af}
 .moves-card .pv-row:hover{background:#e7efdc;border-color:#a8be8c}
-.moves-card .pv-number{width:18px;height:18px;font-size:10px;display:grid;place-items:center;color:#637b50;border:0;background:#e7eddf;border-radius:50%}
+.moves-card .pv-number{min-width:30px;width:max-content;max-width:42px;padding:0 4px;height:18px;font-size:9px;white-space:nowrap;display:grid;place-items:center;color:#637b50;border:0;background:#e7eddf;border-radius:4px}
 .moves-card .pv-best .pv-number{background:#597b40;color:#fff}
 .pv-piece{display:flex;align-items:center;width:22px;height:25px;flex:none}
 .pv-piece .piece{width:100%;height:100%;filter:none}
