@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { StockfishEngine } from '../src/engine.js';
 import { Chess } from '../src/chess-core.js';
-import { DEFAULT_PERFORMANCE, reviewOptions, searchOptions } from '../src/engine-options.js';
+import { DEFAULT_PERFORMANCE, normalizePerformance, reviewOptions, searchOptions } from '../src/engine-options.js';
 
 async function withEngine(run) {
   let worker;
@@ -31,6 +31,14 @@ test('fast overview has a separate bounded budget while detailed searches retain
   assert.equal(reviewOptions(24,custom).movetime,1500);
   assert.equal(searchOptions(24,custom).movetime,30000);
   assert.deepEqual(reviewOptions(24,{...custom,reviewMode:'precise'}),searchOptions(24,custom));
+});
+
+test('resolved automatic and manual parallel task counts reach both review and position search options',()=>{
+  const automatic=normalizePerformance({threadMode:'auto',reviewMode:'fast'},6,16);
+  assert.equal(automatic.threads,6);assert.equal(automatic.threadMode,'auto');
+  assert.deepEqual(reviewOptions(16,automatic),{depth:16,movetime:600,multipv:2,hash:32,threads:6});
+  const manual=normalizePerformance({threadMode:'manual',threads:5,reviewMode:'precise'},6,16);
+  assert.equal(searchOptions(20,manual).threads,5);assert.equal(reviewOptions(20,manual).threads,5);
 });
 
 test('a timed stop returns the last complete MultiPV depth without mixing a newer partial iteration', async () => {
@@ -227,4 +235,79 @@ test('cancellation before initialization rejects the queued search without killi
     await rejected;
     assert.equal(engine.closed,false);
   }finally{engine.dispose();}
+});
+
+function holdResetAcknowledgement(worker,messages) {
+  const send=worker.postMessage.bind(worker);
+  worker.postMessage=command=>{if(command==='isready')messages.push(command);else send(command);};
+}
+
+test('reset clears search state and blocks the next query until its separate ready acknowledgement',async()=>{
+  await withEngine(async({engine,worker,messages})=>{
+    holdResetAcknowledgement(worker,messages);
+    const reset=engine.reset(),query=engine.analyze(new Chess(),{multipv:1});
+    await started();
+    assert.deepEqual(messages.slice(-2),['ucinewgame','isready']);
+    assert.equal(messages.some(command=>command.startsWith('go ')),false);
+    assert.ok(engine.resetPending);assert.equal(engine.initialized,true);
+    worker.emit('readyok');await reset;await started();
+    assert.equal(messages.filter(command=>command.startsWith('go ')).length,1);
+    assert.equal(messages.some(command=>command.includes('Clear Hash')),false);
+    worker.emit(`${info(12,1,25,'e2e4 e7e5')}\nbestmove e2e4`);
+    assert.equal((await query).score.value,25);assert.equal(engine.resetPending,null);
+  });
+});
+
+test('a reset queued behind a search reserves idle before another queued query can start',async()=>{
+  await withEngine(async({engine,worker,messages})=>{
+    holdResetAcknowledgement(worker,messages);
+    const first=engine.analyze(new Chess(),{multipv:1});await started();
+    const reset=engine.reset(),next=engine.analyze(new Chess(),{multipv:1});await started();
+    assert.equal(messages.includes('ucinewgame'),false);
+    worker.emit(`${info(10,1,10,'d2d4')}\nbestmove d2d4`);await first;await started();
+    assert.deepEqual(messages.slice(-2),['ucinewgame','isready']);
+    assert.equal(messages.filter(command=>command.startsWith('go ')).length,1);
+    worker.emit('readyok');await reset;await started();
+    assert.equal(messages.filter(command=>command.startsWith('go ')).length,2);
+    worker.emit(`${info(11,1,20,'e2e4')}\nbestmove e2e4`);await next;
+  });
+});
+
+test('cancel rejects a reset immediately but drains its late readyok before reusing the worker',async()=>{
+  await withEngine(async({engine,worker,messages})=>{
+    holdResetAcknowledgement(worker,messages);
+    const reset=engine.reset(),cancelled=assert.rejects(reset,{name:'AbortError'});await started();
+    engine.cancel();await cancelled;
+    const next=engine.analyze(new Chess(),{multipv:1});await started();
+    assert.equal(messages.some(command=>command.startsWith('go ')),false);
+    assert.equal(messages.includes('stop'),false,'there is no active search to stop during reset');
+    worker.emit('readyok');await started();
+    assert.equal(messages.filter(command=>command.startsWith('go ')).length,1);
+    worker.emit(`${info(12,1,30,'e2e4')}\nbestmove e2e4`);await next;
+    assert.equal(engine.closed,false);
+  });
+});
+
+test('disposing or failing during reset rejects its barrier and releases queued work safely',async()=>{
+  for(const dispose of [true,false])await withEngine(async({engine,worker,messages})=>{
+    holdResetAcknowledgement(worker,messages);
+    const reset=engine.reset(),rejected=assert.rejects(reset,dispose?{name:'AbortError'}:/응답을 읽지/);
+    const next=engine.analyze(new Chess()),nextRejected=assert.rejects(next,{name:'AbortError'});await started();
+    if(dispose)engine.dispose();else worker.onmessageerror();
+    await rejected;await nextRejected;
+    assert.equal(engine.resetPending,null);assert.equal(engine.closed,true);
+    assert.equal(messages.some(command=>command.startsWith('go ')),false);
+  });
+});
+
+test('reset canceled during initialization never sends a new-game command after initialization completes',async()=>{
+  let worker;
+  const messages=[];
+  class FakeWorker {constructor(){worker=this;}postMessage(command){messages.push(command);}terminate(){}}
+  const engine=new StockfishEngine(FakeWorker);
+  try {
+    const reset=engine.reset(),rejected=assert.rejects(reset,{name:'AbortError'});engine.cancel();
+    await started();worker.onmessage({data:'uciok'});worker.onmessage({data:'readyok'});await rejected;
+    assert.equal(messages.includes('ucinewgame'),false);assert.equal(engine.closed,false);
+  } finally {engine.dispose();}
 });

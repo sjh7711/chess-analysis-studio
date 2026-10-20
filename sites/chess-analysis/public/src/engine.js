@@ -37,6 +37,8 @@ function finalResult(pending, engineBestmove) {
 export class StockfishEngine {
   constructor(WorkerType = Worker, { engineId = 'lite', hash = 32, threads = 1, onLoad = () => {} } = {}) {
     this.pending = null;
+    this.resetPending = null;
+    this.initialized = false;
     this.searchGeneration = 0;
     this.idle = Promise.resolve();
     this.closed = false;
@@ -55,8 +57,18 @@ export class StockfishEngine {
             this.send(`setoption name Hash value ${hash}`);
             this.send('isready');
           } else if (line === 'readyok') {
-            clearTimeout(this.readyTimer);
-            resolve();
+            if (!this.initialized) {
+              this.initialized = true;
+              clearTimeout(this.readyTimer);
+              resolve();
+            } else if (this.resetPending) {
+              const reset = this.resetPending;
+              clearTimeout(reset.timer);
+              this.resetPending = null;
+              this.resolveIdle?.();
+              this.resolveIdle = null;
+              if (!reset.cancelled) reset.resolve();
+            }
           } else this.handleLine(line);
         }
       };
@@ -72,11 +84,36 @@ export class StockfishEngine {
     this.ready.catch(() => {});
   }
   send(command) { if (!this.closed) this.worker.postMessage(command); }
+  async reset() {
+    const generation = this.searchGeneration;
+    await this.ready;
+    // A queued operation may reserve a new idle promise before this one wakes.
+    // Recheck it in the same continuation that reserves the reset barrier.
+    for (;;) {
+      const idle = this.idle;
+      await idle;
+      if (this.closed || generation !== this.searchGeneration) throw new DOMException('Cancelled', 'AbortError');
+      if (idle === this.idle) break;
+    }
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => this.fail(new Error('분석 초기화 응답을 받지 못했습니다. 다시 시도해 주세요.')), 10000);
+      this.idle = new Promise(done => { this.resolveIdle = done; });
+      this.resetPending = { resolve, reject, timer, cancelled: false };
+      // Stockfish clears the transposition table and search histories for a new
+      // game. The ready acknowledgement keeps the next job behind that work.
+      this.send('ucinewgame');
+      this.send('isready');
+    });
+  }
   async analyze(chess, { depth = 16, movetime = 1200, multipv = 3, searchMoves, onInfo } = {}) {
     const generation = this.searchGeneration;
     await this.ready;
-    await this.idle;
-    if (this.closed || generation !== this.searchGeneration) throw new DOMException('Cancelled', 'AbortError');
+    for (;;) {
+      const idle = this.idle;
+      await idle;
+      if (this.closed || generation !== this.searchGeneration) throw new DOMException('Cancelled', 'AbortError');
+      if (idle === this.idle) break;
+    }
     if (this.pending) throw new Error('An engine search is already running.');
     if (!Number.isInteger(multipv) || multipv < 1) throw new Error('후보 수는 1 이상의 정수여야 합니다.');
     const legalMoves = new Set(chess.moves({ verbose: true }).map(uciMove));
@@ -120,6 +157,11 @@ export class StockfishEngine {
   }
   cancel() {
     this.searchGeneration++;
+    if (this.resetPending && !this.resetPending.cancelled) {
+      this.resetPending.cancelled = true;
+      this.resetPending.reject(new DOMException('Cancelled', 'AbortError'));
+      // Drain its readyok before a later job; an acknowledgement has no UCI id.
+    }
     if (!this.pending || this.pending.cancelled) return;
     this.pending.cancelled = true;
     this.pending.reject(new DOMException('Cancelled', 'AbortError'));
@@ -130,6 +172,7 @@ export class StockfishEngine {
     clearTimeout(this.readyTimer);
     this.rejectReady?.(error);
     if (this.pending) { clearTimeout(this.pending.timer); this.pending.reject(error); this.pending = null; }
+    if (this.resetPending) { clearTimeout(this.resetPending.timer); this.resetPending.reject(error); this.resetPending = null; }
     this.resolveIdle?.();
     this.resolveIdle = null;
     this.abort.abort();

@@ -2,8 +2,8 @@ export const ENGINES = Object.freeze({
   lite: { name: 'Stockfish 19 Lite', worker: '/engine/stockfish-19-lite-single.js', parallelWorker: '/engine/stockfish-19-lite.js' },
   full: { name: 'Stockfish 19', worker: '/engine/stockfish-19-single.js', parallelWorker: '/engine/stockfish-19.js' },
 });
-export const DEFAULT_ENGINE_ID = 'full';
-export const REVIEW_ENGINE_ID = 'full';
+export const DEFAULT_ENGINE_ID = 'lite';
+export const REVIEW_ENGINE_ID = 'lite';
 export const FULL_ENGINE_SIZE = 99102793;
 export const ENGINE_CHUNK_SIZE = 20 * 1024 * 1024;
 export function engineChunks(parallel = false) {
@@ -14,19 +14,40 @@ export function engineChunks(parallel = false) {
   size: Math.min(ENGINE_CHUNK_SIZE, size - i * ENGINE_CHUNK_SIZE),
 }));
 }
-export const DEFAULT_PERFORMANCE = Object.freeze({ movetime: 0, multipv: 3, hash: 32, threads: 1, reviewMode: 'precise' });
+export const AUTO_THREAD_FRACTION = 0.4;
+export const AUTO_THREAD_LABEL = '자동 · 논리 코어 약 40%';
+export const DEFAULT_PERFORMANCE = Object.freeze({ movetime: 0, multipv: 3, hash: 32, threadMode: 'auto', threads: 1, reviewMode: 'precise' });
 export function engineId(value) { return Object.keys(ENGINES).find(id => id === value || ENGINES[id].name === value) || DEFAULT_ENGINE_ID; }
-export function supportedThreads(isolated = globalThis.crossOriginIsolated, cores = globalThis.navigator?.hardwareConcurrency || 1) {
-  return isolated && typeof SharedArrayBuffer !== 'undefined' ? [1, 2, 4, 8].filter(n => n <= cores).at(-1) || 1 : 1;
+const logicalCores = value => Number.isFinite(value)&&value>=1?Math.floor(value):1;
+const threadLimit = value => Math.min(8,logicalCores(value));
+// Independent single-thread workers do not share memory and therefore do not
+// require the isolation headers needed by the engine's internal pthread build.
+export function availableReviewWorkers(cores = globalThis.navigator?.hardwareConcurrency || 1) {
+  return Array.from({length:threadLimit(cores)},(_,index)=>index+1);
 }
-export function normalizePerformance(value = {}, maxThreads = 8) {
+export function availableThreads(isolated = globalThis.crossOriginIsolated, cores = globalThis.navigator?.hardwareConcurrency || 1) {
+  const maximum=isolated&&typeof SharedArrayBuffer!=='undefined'?threadLimit(cores):1;
+  return Array.from({length:maximum},(_,index)=>index+1);
+}
+export function supportedThreads(isolated = globalThis.crossOriginIsolated, cores = globalThis.navigator?.hardwareConcurrency || 1) {
+  return availableThreads(isolated,cores).at(-1);
+}
+// The detected task limit is authoritative. This is a conservative share of
+// logical cores, not a measurement or promise of system-wide CPU utilization.
+export function automaticThreads(maxThreads = availableReviewWorkers().at(-1), cores = globalThis.navigator?.hardwareConcurrency || 1) {
+  return Math.max(1,Math.min(threadLimit(maxThreads),Math.floor(logicalCores(cores)*AUTO_THREAD_FRACTION)));
+}
+export function normalizePerformance(value = {}, maxThreads = availableReviewWorkers().at(-1), cores = globalThis.navigator?.hardwareConcurrency || 1) {
   value ||= {};
+  const maximum=threadLimit(maxThreads),threadMode=value.threadMode==='manual'?'manual':'auto';
   return {
     reviewMode: value.reviewMode === 'fast' ? 'fast' : 'precise',
     movetime: [0, 500, 1000, 3000, 5000, 10000, 30000].includes(value.movetime) ? value.movetime : 0,
     multipv: [1, 2, 3, 5].includes(value.multipv) ? value.multipv : 3,
     hash: [16, 32, 64, 128, 256].includes(value.hash) ? value.hash : 32,
-    threads: [1, 2, 4, 8].includes(value.threads) && value.threads <= maxThreads ? value.threads : 1,
+    threadMode,
+    threads: threadMode==='auto'?automaticThreads(maximum,cores)
+      :Number.isInteger(value.threads)&&value.threads>=1&&value.threads<=maximum?value.threads:1,
   };
 }
 export function searchOptions(depth, performance = DEFAULT_PERFORMANCE) {
@@ -36,9 +57,9 @@ export function searchOptions(depth, performance = DEFAULT_PERFORMANCE) {
 export function analysisKey(id, depth, performance, scope = 'position') {
   const options = scope === 'game' ? gameReviewOptions(depth, performance) : searchOptions(depth, performance);
   // The scope distinguishes a completed game review from an explicitly requested
-  // position search with more candidates. v4 also refreshes reviews that lack
-  // verified acceptance branches for sacrifice grading and explanations.
-  return ['review-v4',scope,id, options.depth, options.movetime, options.multipv, options.hash, options.threads].join(':');
+  // position search with more candidates. v5 identifies independent review
+  // workers, rather than the older internal engine-thread count policy.
+  return ['review-v5',scope,id, options.depth, options.movetime, options.multipv, options.hash, options.threads].join(':');
 }
 
 export function reviewOptions(depth, performance = DEFAULT_PERFORMANCE) {

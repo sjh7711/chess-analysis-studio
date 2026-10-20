@@ -1,7 +1,8 @@
 import { Chess, parseGame, gameAt, classifyMove, hasMoveReview, assessedMoveResult, MOVE_GRADES, GRADING_BASIS, formatScore, scoreValue, pvToSan, exportPgn } from './chess-core.js';
 import { StockfishEngine } from './engine.js';
 import { reviewMove } from './review.js';
-import { ENGINES, DEFAULT_ENGINE_ID, REVIEW_ENGINE_ID, engineId, normalizePerformance, supportedThreads, searchOptions, reviewOptions, gameReviewOptions, analysisKey } from './engine-options.js';
+import { ENGINES, DEFAULT_ENGINE_ID, REVIEW_ENGINE_ID, AUTO_THREAD_LABEL, availableReviewWorkers, automaticThreads, engineId, normalizePerformance, searchOptions, reviewOptions, gameReviewOptions, analysisKey } from './engine-options.js';
+import { reviewGame } from './game-review.js';
 import { pieceSvg, pieceSnapshot, pieceTransitions, StepNavigation, capturedPieces, capturedMarkup } from './pieces.js';
 import { BoardAnnotations } from './annotations.js';
 import { SAMPLE_PGN } from './sample.js';
@@ -25,11 +26,12 @@ let renderedBoard=null, renderedFlipped=false, editorPieceId=0;
 const pieceMotions=new Map();
 const stepNavigation=new StepNavigation(()=>pieceMotions.size>0);
 const settings = { 12: true, 16: true, 20: true, 24: true };
-const maxThreads = supportedThreads();
-let selectedEngine = DEFAULT_ENGINE_ID, performanceOptions = normalizePerformance({}, maxThreads);
+const logicalCores=Math.max(1,Math.floor(Number(navigator.hardwareConcurrency)||1));
+const maxThreads = availableReviewWorkers(logicalCores).at(-1);
+let selectedEngine = DEFAULT_ENGINE_ID, performanceOptions = normalizePerformance({}, maxThreads,logicalCores);
 const state = { game:parseGame(SAMPLE_PGN), index:59, flipped:false, results:new Map(), line:null, editor:null, playing:false, selected:null, mode:null, error:null, tab:'moves', chartMode:'game' };
 const annotations=new BoardAnnotations($('board'),{isFlipped:()=>state.flipped,enabled:()=>!state.editor,toggleButton:$('annotation-mode'),clearButton:$('annotation-clear')});
-let engine = null, engineConfig = '', generation = 0, debounce, toastTimer, pendingPromotion, draggedSquare, suppressClickUntil = 0;
+let engine = null, engineConfig = '', reviewAbort=null, generation = 0, debounce, toastTimer, pendingPromotion, draggedSquare, suppressClickUntil = 0;
 const playback = new PlaybackClock(advancePlayback);
 window.addEventListener('analysis-notice',({detail:{message,test}})=>{
   toast(message);
@@ -42,10 +44,9 @@ try {
     state.game = parseGame(saved.input, saved.kind);
     state.index = Math.min(state.game.moves.length, Math.max(0, Number(saved.index) || 0));
     if (settings[saved.depth]) $('depth').value = saved.depth;
-    // Review always starts with full NNUE. Legacy Lite evaluations cannot be
-    // restored as if they were results from the full engine.
+    // Start with the selected review engine and restore only matching results.
     selectedEngine = REVIEW_ENGINE_ID;
-    performanceOptions = normalizePerformance(saved.performance, maxThreads);
+    performanceOptions = normalizePerformance(saved.performance, maxThreads,logicalCores);
     if (saved.analysisVersion!==2) performanceOptions.reviewMode='precise';
     state.results = restoreResults(saved,state.game.positions.length,ENGINES[selectedEngine].name);
     for (const [index,result] of state.results) if (!isCached(result)) state.results.delete(index);
@@ -100,11 +101,11 @@ function isCached(result) {
   return false;
 }
 function createEngine(run) {
-  const nextConfig = `${selectedEngine}:${performanceOptions.hash}:${performanceOptions.threads}`;
+  const nextConfig = `${selectedEngine}:${performanceOptions.hash}:1`;
   if (engine && !engine.closed && engineConfig === nextConfig) return engine;
   engine?.dispose();
   engineConfig = nextConfig;
-  return new StockfishEngine(Worker, { engineId:selectedEngine, ...performanceOptions, onLoad:percent => {
+  return new StockfishEngine(Worker, { engineId:selectedEngine, ...performanceOptions, threads:1, onLoad:percent => {
     if (engineConfig !== nextConfig) return;
     $('engine-download').hidden = selectedEngine !== 'full' || percent >= 100;
     $('engine-download').textContent = `Stockfish 19 다운로드 ${percent}%`;
@@ -117,6 +118,7 @@ function stopJob() {
   completionAlerts.cancel();
   generation++;
   clearTimeout(debounce);
+  reviewAbort?.abort(); reviewAbort=null;
   engine?.cancel();
   state.mode = null;
   $('engine-download').hidden = true;
@@ -198,43 +200,36 @@ async function analyzeGame(restart = false) {
   const overviewOptions = gameReviewOptions(Number($('depth').value),performanceOptions);
   completionAlerts.begin(run);
   document.title='체스 분석';
-  let analyzed=0;
   state.mode = 'full'; state.error = null;
-  const chess = new Chess(state.game.startFen);
+  const game=state.game,abort=new AbortController();
+  reviewAbort=abort;
   renderResults();
   try {
-    engine = createEngine(run);
-    for (let index = 0; index < state.game.positions.length; index++) {
-      if (run !== generation) return;
-      let result=state.results.get(index),changed=false;
-      if (!isCached(result)) {
-        const detailed = performanceOptions.reviewMode === 'precise';
-        result = await engine.analyze(chess, overviewOptions);
-        if (run !== generation) return;
-        result.requestedDepth = options.depth;
-        result.configKey = configKey('game');
-        result.overview = !detailed;
-        analyzed++;
-        changed=true;
-      }
-      const before=state.results.get(index-1),played=state.game.moves[index-1];
-      if (played && before && !hasMoveReview(before,result,played)) {
-        result=await reviewMove(engine,gameAt(state.game,index-1),before,result,played,before.overview?overviewOptions:options);
-        if (run!==generation) return;
-        changed=true;
-      }
-      if (changed) {
-        state.results.set(index,result);
-        renderResults();
-        if (analyzed % 5 === 0) persist();
-      }
-      const move = state.game.moves[index];
-      if (move) chess.move({ from:move.from, to:move.to, promotion:move.promotion });
-    }
-    if (run === generation && analyzed) completionAlerts.complete(run,`${state.game.headers.White || '백'} vs ${state.game.headers.Black || '흑'} · ${state.game.positions.length}개 국면 분석 완료`);
+    // Whole-game concurrency distributes distinct positions across independent
+    // single-thread workers. Never multiply the same root's SMP search.
+    engine?.dispose();engine=null;engineConfig='';
+    let completed=0,renderFrame=0;
+    const refresh=()=>{renderFrame=0;if(run===generation)renderResults();};
+    let outcome;
+    try {
+      outcome=await reviewGame(game,{
+        concurrency:performanceOptions.threads,
+        createEngine:()=>new StockfishEngine(Worker,{engineId:REVIEW_ENGINE_ID,hash:performanceOptions.hash,threads:1}),
+        signal:abort.signal,results:state.results,isCached,options:overviewOptions,comparisonOptions:options,
+        configKey:configKey('game'),overview:performanceOptions.reviewMode!=='precise',
+        onResult:(result,index)=>{
+          if(run!==generation||game!==state.game)return;
+          state.results.set(index,result);
+          if(!renderFrame)renderFrame=requestAnimationFrame(refresh);
+          if(++completed%5===0)persist();
+        },
+      });
+    } finally { if(renderFrame)cancelAnimationFrame(renderFrame); }
+    if (run === generation && (outcome.analyzed||outcome.reviewed)) completionAlerts.complete(run,`${game.headers.White || '백'} vs ${game.headers.Black || '흑'} · ${game.positions.length}개 국면 분석 완료`);
   } catch (error) {
     if (run === generation && error.name !== 'AbortError') { state.error = error.message; toast(error.message, true); }
   } finally {
+    if(reviewAbort===abort)reviewAbort=null;
     if (run === generation) { completionAlerts.cancel(run); state.mode = null; renderResults(); persist(); }
   }
 }
@@ -376,7 +371,7 @@ function renderAnalysis() {
   const busy = !!state.mode && state.mode!=='explanation';
   $('engine-status-dot').className = `status-dot${state.error ? ' error' : busy ? ' busy' : ''}`;
   $('engine-name').textContent = ENGINES[selectedEngine].name;
-  $('engine-settings-open').title = `엔진 및 성능 설정 · ${performanceOptions.threads} 스레드 · ${performanceOptions.multipv} 라인 · ${performanceOptions.hash} MB`;
+  $('engine-settings-open').title = `엔진 및 성능 설정 · ${performanceOptions.threadMode==='auto'?'자동 ':''}${performanceOptions.threads}개 동시 작업 · ${performanceOptions.multipv} 라인 · ${performanceOptions.hash} MB`;
   if (!busy) $('engine-download').hidden = true;
   renderCoach();
   $('arrow-label').textContent=state.line?.kind==='pv'?'다음 재생 수 표시':'추천 수 표시';
@@ -398,12 +393,17 @@ function renderAnalysis() {
   $('restart-game').hidden = state.mode === 'full' || !state.game.moves.length || complete === 0 || complete === state.game.positions.length;
   $('restart-game').disabled = !!state.editor;
   $('analysis-progress').hidden = state.mode !== 'full';
-  $('progress-text').textContent = `${performanceOptions.reviewMode === 'fast' ? '빠른 검토' : '정밀 검토'} · ${complete} / ${state.game.positions.length} 국면`;
-  const percent = Math.round(complete/state.game.positions.length*100);
+  const evaluated=state.game.positions.filter((_,index)=>isCached(state.results.get(index))).length;
+  const totalTasks=state.game.positions.length+state.game.moves.length;
+  const doneTasks=evaluated+Math.max(0,complete-Number(isCached(state.results.get(0))));
+  $('progress-text').textContent = evaluated<state.game.positions.length
+    ? `국면 분석 · ${evaluated} / ${state.game.positions.length} · ${performanceOptions.threads}개 작업`
+    : `수 검토 · ${Math.max(0,complete-1)} / ${state.game.moves.length}`;
+  const percent = Math.round(doneTasks/totalTasks*100);
   $('progress-percent').textContent = `${percent}%`;
-  $('progress-bar').max = state.game.positions.length;
-  $('progress-bar').value = complete;
-  $('analysis-progress').title='원본 대국 전체의 분석 진행도입니다. 시작 국면도 포함하며, 재생 진행도와는 별개입니다.';
+  $('progress-bar').max = totalTasks;
+  $('progress-bar').value = doneTasks;
+  $('analysis-progress').title='국면 분석과 수 검토의 완료 작업 수입니다. 작업별 소요 시간은 다를 수 있습니다.';
   $('pv-lines').style.setProperty('--pv-columns',Math.min(performanceOptions.multipv,3));
   if (result?.lines?.length) {
     const fen = currentChess().fen();
@@ -530,13 +530,13 @@ function startInsight(kind,scope='core') {
   if (!insightContext || state.game !== insightContext.game || !['response','alternative','sacrifice'].includes(kind)) return;
   if(selectedEngine!==REVIEW_ENGINE_ID) {
     void analyzeGame();
-    toast('Stockfish 19 정식판으로 리뷰를 시작합니다. 완료 후 수 설명을 확인하세요.');
+    toast('Stockfish 19 Lite로 리뷰를 시작합니다. 완료 후 수 설명을 확인하세요.');
     return;
   }
   const source=kind==='alternative'?insightContext.before:kind==='sacrifice'
     ?insightContext.after.moveReview?.sacrificeReview?.branches?.[0]:assessedMoveResult(insightContext.before,insightContext.after,state.game.moves[insightContext.index-1]);
-  const options=explanationOptions(Number($('depth').value),source?.depth,performanceOptions);
-  const engineKey=`sf19:${selectedEngine}:${performanceOptions.hash}:${performanceOptions.threads}`;
+  const options=explanationOptions(Number($('depth').value),source?.depth,{...performanceOptions,threads:1});
+  const engineKey=`sf19:${selectedEngine}:${performanceOptions.hash}:1`;
   const cached=explanationSearch.get(insightContext,kind,options,engineKey);
   const updated=cached && refineInsight(insightContext,kind,cached);
   const context=updated?{...insightContext,insight:updated}:insightContext;
@@ -610,7 +610,7 @@ function openCoachExplanation() {
   if ($('coach-explain').getAttribute('aria-expanded')==='true') { closeCoachExplanation(); return; }
   if(selectedEngine!==REVIEW_ENGINE_ID) {
     void analyzeGame();
-    toast('Stockfish 19 정식판으로 리뷰를 시작합니다. 완료 후 수 설명을 확인하세요.');
+    toast('Stockfish 19 Lite로 리뷰를 시작합니다. 완료 후 수 설명을 확인하세요.');
     return;
   }
   renderInsight();
@@ -975,7 +975,7 @@ function setGame(game, saved = null) {
   selectedEngine=REVIEW_ENGINE_ID;
   if(saved){
     state.index=Math.min(game.moves.length,Math.max(0,Number(saved.index)||0));
-    selectedEngine=REVIEW_ENGINE_ID;performanceOptions=normalizePerformance(saved.performance,maxThreads);
+    selectedEngine=REVIEW_ENGINE_ID;performanceOptions=normalizePerformance(saved.performance,maxThreads,logicalCores);
     if (saved.analysisVersion!==2) performanceOptions.reviewMode='precise';
     if(settings[saved.depth])$('depth').value=saved.depth;
     state.results=restoreResults(saved,game.positions.length,ENGINES[selectedEngine].name);
@@ -1021,9 +1021,12 @@ $('engine-settings-open').onclick = () => {
   $('settings-review').value = performanceOptions.reviewMode;
   $('settings-lines').value = performanceOptions.multipv;
   $('settings-hash').value = performanceOptions.hash;
-  $('settings-threads').value = performanceOptions.threads;
-  for (const option of $('settings-threads').options) option.disabled = Number(option.value) > maxThreads;
-  $('threads-note').textContent = maxThreads > 1 ? `이 기기에서 최대 ${maxThreads}개 사용 가능` : '이 브라우저 환경에서는 1개 스레드를 사용할 수 있습니다.';
+  const automatic=automaticThreads(maxThreads,logicalCores);
+  $('settings-threads').innerHTML=`<option value="auto">${AUTO_THREAD_LABEL} · ${automatic}개 작업</option>${availableReviewWorkers(logicalCores).map(count=>`<option value="${count}">수동 · ${count}개 작업</option>`).join('')}`;
+  $('settings-threads').value = performanceOptions.threadMode==='auto'?'auto':String(performanceOptions.threads);
+  $('threads-note').textContent = maxThreads > 1
+    ? `논리 코어 ${logicalCores}개 기준 자동 ${automatic}개 작업 · 최대 ${maxThreads}개. 전체 대국의 서로 다른 국면을 나누어 분석합니다. 현재 국면·전구는 1개 작업으로 분석합니다. 실제 CPU 점유율 40%를 제한하는 기능은 아닙니다.`
+    : '이 기기에서는 1개 작업으로 분석합니다.';
   $('engine-settings-dialog').showModal();
 };
 $('engine-settings-close').onclick = () => $('engine-settings-dialog').close();
@@ -1032,10 +1035,14 @@ $('engine-settings-form').onsubmit = event => {
   event.preventDefault();
   const nextEngine = engineId($('engine-choice').value);
   const nextDepth = Number($('settings-depth').value);
-  const nextPerformance = normalizePerformance({reviewMode:$('settings-review').value,movetime:Number($('settings-time').value),multipv:Number($('settings-lines').value),hash:Number($('settings-hash').value),threads:Number($('settings-threads').value)}, maxThreads);
+  const threadChoice=$('settings-threads').value;
+  const nextPerformance = normalizePerformance({reviewMode:$('settings-review').value,movetime:Number($('settings-time').value),multipv:Number($('settings-lines').value),hash:Number($('settings-hash').value),threadMode:threadChoice==='auto'?'auto':'manual',threads:Number(threadChoice)}, maxThreads,logicalCores);
   const changed = configKey() !== analysisKey(nextEngine,nextDepth,nextPerformance) || nextPerformance.reviewMode !== performanceOptions.reviewMode;
   $('engine-settings-dialog').close();
-  if (!changed) return;
+  if (!changed) {
+    if(nextPerformance.threadMode!==performanceOptions.threadMode){performanceOptions=nextPerformance;persist();renderAnalysis();}
+    return;
+  }
   pausePlayback(); stopJob();
   leaveExplanationSnapshot();
   selectedEngine=nextEngine;performanceOptions=nextPerformance;$('depth').value=nextDepth;
@@ -1238,7 +1245,7 @@ document.addEventListener('keydown', event => {
   const action = {ArrowLeft:'prev',ArrowRight:'next',Home:'first',End:'last',f:'flip',F:'flip'}[event.key];
   if (action) { event.preventDefault(); $(action).click(); }
 });
-window.addEventListener('pagehide', () => { pausePlayback();persist(); engine?.dispose(); });
+window.addEventListener('pagehide', () => { pausePlayback();reviewAbort?.abort();persist(); engine?.dispose(); });
 document.addEventListener('visibilitychange',()=>{if(document.hidden){pausePlayback();renderStudy();}});
 
 // Reserve the move list itself, in addition to the chart and playback controls.
