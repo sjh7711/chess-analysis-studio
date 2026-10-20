@@ -139,3 +139,53 @@ test('losing promotion control, a blocked promotion, a nonescaping move or a dis
     played('3r3k/8/4P3/8/8/8/8/6K1 b - - 0 20','Ra8'),
   ])assert.deepEqual(unchanged(move).promotionEscapes,[]);
 });
+
+test('vacating a knight opens a new queen recapture to defend the previously unprotected bishop',()=>{
+  // Carlsen-Guha, 15.Nf3: the d2 knight clears Qd1-d3, besides attacking Ne5.
+  const move=played('r4rk1/ppq2ppp/5n2/3pn3/5b2/2PB3P/PP1N1PP1/R1BQR1K1 w - - 0 15','Nf3');
+  assert.deepEqual(unchanged(move).discoveredDefenses,[{color:'w',defenderSquare:'d1',defenderType:'q',
+    protectedSquare:'d3',protectedType:'b',attackerSquare:'e5',attackerType:'n'}]);
+  const previous=new Chess(move.before),fields=previous.fen().split(' ');fields[1]='b';
+  const capture=new Chess(fields.join(' '));capture.move('Nxd3');
+  assert.equal(capture.moves({verbose:true}).some(reply=>reply.captured&&reply.to==='d3'),false);
+  const following=new Chess(move.after);following.move('Nxd3');assert.equal(following.move('Qxd3').captured,'n');
+  assert.match(describeMove(move,null,null).text,/d2.*비워.*d1의 퀸.*d3의 비숍.*지키/);
+  assert.doesNotMatch(describeMove(move,null,null).text,/e5의 나이트를 공격/);
+});
+
+test('vacating a king reveals rook defence that makes the former enemy-king capture illegal',()=>{
+  // Carlsen-Guha, 54.Kf6: Kf5 had blocked Rg5-d5, allowing ...Kxd5.
+  const move=played('8/5p2/3k4/3P1KRP/5P2/7r/8/8 w - - 5 54','Kf6');
+  assert.deepEqual(unchanged(move).discoveredDefenses,[{color:'w',defenderSquare:'g5',defenderType:'r',
+    protectedSquare:'d5',protectedType:'p',attackerSquare:'d6',attackerType:'k'}]);
+  const fields=move.before.split(' ');fields[1]='b';
+  assert.equal(new Chess(fields.join(' ')).move('Kxd5').captured,'p');
+  assert.throws(()=>new Chess(move.after).move('Kxd5'));
+  assert.match(describeMove(move,null,null).text,/f5.*비워.*g5의 룩.*d5의 폰.*지키/);
+  assert.doesNotMatch(describeMove(move,null,null).text,/f7의 폰을 공격/);
+});
+
+test('new defence requires a real previous unanswered capture, a clear ray and a legal unpinned defender',()=>{
+  for(const [fen,san] of [
+    ['6k1/8/8/4n3/8/3B4/3N4/2KQ3r w - - 0 20','Nf3'], // pinned queen
+    ['6k1/8/8/5n2/3B4/3P4/3N4/3Q2K1 w - - 0 20','Nf3'], // second blocker
+    ['6k1/8/8/4n3/8/3B4/8/1N1Q2K1 w - - 0 20','Nc3'], // already clear
+    ['6k1/8/8/8/8/3B4/3N4/3Q2K1 w - - 0 20','Nf3'], // no prior attack
+    ['6k1/8/8/4n3/8/3B4/2PN4/3Q2K1 w - - 0 20','Nf3'], // already recapturable
+  ])assert.deepEqual(unchanged(played(fen,san)).discoveredDefenses,[]);
+});
+
+test('a bishop can block a verified queen capture of a pawn before its secondary attack',()=>{
+  // Carlsen-Guha, 19.Bb3: block Qb6-b2 while also attacking Pd5.
+  const move=played('r3r1k1/pp3ppp/1q3n2/3p4/8/2P2Q1P/PPB2PP1/2R1R1K1 w - - 3 19','Bb3');
+  assert.ok(unchanged(move).blocks.some(item=>item.kind==='block'&&item.protectedSquare==='b2'&&item.protectedType==='p'
+    &&item.attackerSquare==='b6'));
+  const fields=move.before.split(' ');fields[1]='b';
+  assert.equal(new Chess(fields.join(' ')).move('Qxb2').captured,'p');
+  assert.throws(()=>new Chess(move.after).move('Qxb2'));
+  assert.match(describeMove(move,null,null).text,/b3.*b6의 퀸.*b2의 폰.*공격하던 길.*막/);
+  for(const negative of [
+    played('6k1/8/1q6/8/1p6/8/PPB2P2/6K1 w - - 0 20','Bb3'),
+    played('6k1/8/1q6/8/8/8/PPB2P2/1R4K1 w - - 0 20','Bd3'),
+  ])assert.deepEqual(unchanged(negative).blocks,[]);
+});

@@ -77,6 +77,40 @@ function discoveredAttacks(move,before,after) {
   return found;
 }
 
+function legalControl(position,color,from,target) {
+  // A friendly occupied square is defended only if this piece could legally
+  // recapture there. The stand-in is local, never a change to the game; pawns
+  // cannot occupy the first or eighth rank even in a legality probe.
+  const probe=new Chess(position.fen());
+  probe.remove(target);probe.put({type:['1','8'].includes(target[1])?'n':'p',color:color==='w'?'b':'w'},target);
+  return captures(probe,color).some(capture=>capture.from===from&&capture.to===target);
+}
+
+function discoveredDefenses(move,before,after) {
+  const defenders=men(after).filter(piece=>piece.color===move.color&&slider(piece.type)&&piece.square!==move.to
+    && before.get(piece.square)?.color===move.color&&before.get(piece.square)?.type===piece.type);
+  const targets=men(after).filter(piece=>piece.color===move.color&&piece.type!=='k'&&piece.square!==move.to
+    && before.get(piece.square)?.color===move.color&&before.get(piece.square)?.type===piece.type);
+  const candidates=defenders.flatMap(defender=>targets.filter(target=>between(defender.square,target.square,move.from))
+    .map(target=>({defender,target})));
+  if(!candidates.length)return [];
+  const enemy=move.color==='w'?'b':'w',previous=captures(before,enemy),following=captures(after,enemy),found=[];
+  for(const {defender,target} of candidates) {
+    if(legalControl(before,move.color,defender.square,target.square)
+      || !legalControl(after,move.color,defender.square,target.square))continue;
+    const attack=previous.find(capture=>capture.to===target.square&&!capture.flags.includes('e')
+      && after.get(capture.from)?.color===enemy&&after.get(capture.from)?.type===capture.piece
+      && !new Chess(capture.after).moves({verbose:true}).some(reply=>reply.captured&&reply.to===capture.to)
+      && (capture.piece==='k'
+        ? !following.some(next=>next.from===capture.from&&next.to===capture.to)
+        : following.some(next=>next.from===capture.from&&next.to===capture.to
+          && new Chess(next.after).moves({verbose:true}).some(reply=>reply.from===defender.square&&reply.to===next.to&&reply.captured))));
+    if(attack)found.push({color:move.color,defenderSquare:defender.square,defenderType:defender.type,
+      protectedSquare:target.square,protectedType:target.type,attackerSquare:attack.from,attackerType:attack.piece});
+  }
+  return found;
+}
+
 function checkingSkewers(move,after) {
   if(!after.isCheck())return [];
   const king=men(after).find(piece=>piece.color!==move.color&&piece.type==='k'),found=[];
@@ -108,12 +142,16 @@ function defensiveBlocks(move,before,after) {
   if(move.captured || move.piece==='k')return [];
   const enemy=move.color==='w'?'b':'w',king=men(before).find(piece=>piece.color===move.color&&piece.type==='k');
   const attackers=men(before).filter(piece=>piece.color===enemy&&slider(piece.type));
-  const targets=men(before).filter(piece=>piece.color===move.color&&major(piece.type)&&piece.square!==move.from);
+  const targets=men(before).filter(piece=>piece.color===move.color&&piece.type!=='k'&&piece.square!==move.from);
   if(!attackers.some(attacker=>targets.some(target=>between(attacker.square,target.square,move.to)
     || between(attacker.square,king.square,target.square)&&between(attacker.square,king.square,move.to))))return [];
   const beforeCaptures=captures(before,enemy),afterCaptures=captures(after,enemy),found=[];
   for(const capture of beforeCaptures) {
-    if(!slider(capture.piece) || !major(capture.captured) || capture.to===move.from)continue;
+    if(!slider(capture.piece) || capture.to===move.from || capture.flags.includes('e'))continue;
+    // Blocking a pawn exchange already covered by a legal recapture is a
+    // secondary effect, not a new urgent defence to put before an attack.
+    if(capture.captured==='p' && new Chess(capture.after).moves({verbose:true})
+      .some(reply=>reply.captured&&reply.to===capture.to))continue;
     const attacker=after.get(capture.from),target=after.get(capture.to);
     if(attacker?.color!==enemy || attacker.type!==capture.piece || target?.color!==move.color
       || target.type!==capture.captured || !between(capture.from,capture.to,move.to)
@@ -170,6 +208,7 @@ export function tacticalPatterns(move) {
   const board=validatedMove(move);
   const freeze=items=>Object.freeze(items.map(item=>Object.freeze(item)));
   const result=board?Object.freeze({discovered:freeze(discoveredAttacks(board.actual,board.before,board.after)),
+    discoveredDefenses:freeze(discoveredDefenses(board.actual,board.before,board.after)),
     skewers:freeze(checkingSkewers(board.actual,board.after)),blocks:freeze(defensiveBlocks(board.actual,board.before,board.after)),
     promotionEscapes:freeze(promotionEscapes(board.actual,board.before,board.after))}):null;
   cache.set(move,{signature,result});

@@ -1,4 +1,4 @@
-import { Chess, expectedPoints, hasMoveReview, sacrificeCandidates, scoreValue, uciMove } from './chess-core.js';
+import { Chess, expectedPoints, hasMoveReview, hasRankingReview, needsRankingReview, sacrificeCandidates, scoreValue, uciMove } from './chess-core.js';
 import { isBookMove } from './opening-book.js';
 
 function legalBranch(fen,line,captures) {
@@ -60,12 +60,44 @@ async function reviewSacrifice(engine,chess,before,after,move,options) {
   return {...after,moveReview:{...after.moveReview,sacrificeReview:evidence}};
 }
 
+async function reviewRanking(engine,chess,before,after,move,options) {
+  if(!needsRankingReview(before,after,move,chess) || !engine?.analyze)return after;
+  const review=after.moveReview,movetime=Math.min(1200,Number.isFinite(options.movetime)&&options.movetime>0?options.movetime:1200);
+  const history=chess.history({verbose:true});
+  const evidence={version:1,scope:'unrestricted-root',fen:move.before,afterFen:move.after,uci:uciMove(move),configKey:before.configKey,
+    startFen:history[0]?.before||chess.fen(),historyMoves:history.map(uciMove),
+    beforeScore:{...before.score},beforeDepth:before.depth,beforeBestmove:before.bestmove,
+    playedScore:{...review.score},playedDepth:review.depth,playedPv:[...review.pv],playedSource:review.source,
+    requestedDepth:before.depth,requestedMultipv:Math.min(3,before.lines.length),movetime,searchMoves:null,status:'unverified',result:null};
+  try {
+    // Independent one-root and MultiPV searches can disagree even at the same
+    // depth. Recheck all legal roots using the original root's candidate count,
+    // without warming this confirmation with the played-only search's table.
+    await engine.reset?.();
+    const settings={...options,depth:evidence.requestedDepth,movetime,multipv:evidence.requestedMultipv};
+    delete settings.searchMoves;
+    const result=await engine.analyze(chess,settings);
+    evidence.result={score:result.score&&{...result.score},depth:result.depth,bestmove:result.bestmove,
+      engineBestmove:result.engineBestmove,multipvComplete:result.multipvComplete,
+      lines:Array.isArray(result.lines)?result.lines.map(line=>({...line,score:line.score&&{...line.score},pv:Array.isArray(line.pv)?[...line.pv]:line.pv})):[]};
+    evidence.status=result.depth===before.depth?'complete':'depth-limited';
+    const enriched={...after,moveReview:{...review,rankingReview:evidence}};
+    if(hasRankingReview(before,enriched,move,chess))return enriched;
+  } catch(error) {
+    if(error.name==='AbortError')throw error;
+    // Optional confidence checks may fail without discarding a sound primary
+    // review. A bound attempted check is cached; it is never best-move proof.
+  }
+  evidence.result=null;evidence.status='unverified';
+  return {...after,moveReview:{...review,rankingReview:evidence}};
+}
+
 // Grade the played move from the same root as the engine's best move. Scores
 // from independently searched child positions are kept for the graph only.
 export async function reviewMove(engine, chess, before, after, move, options = {}) {
   if (!move || !before) return after;
   if (chess.fen()!==move.before) throw new Error('수 평가의 시작 국면이 일치하지 않습니다.');
-  if (hasMoveReview(before,after,move)) return reviewSacrifice(engine,chess,before,after,move,options);
+  if (hasMoveReview(before,after,move)) return reviewSacrifice(engine,chess,before,await reviewRanking(engine,chess,before,after,move,options),move,options);
   const uci=uciMove(move);
   let candidate,source;
   if (after.terminal) {
@@ -95,5 +127,5 @@ export async function reviewMove(engine, chess, before, after, move, options = {
   const reviewed={...after,moveReview:{version:1,fen:move.before,uci,configKey:before.configKey,
     beforeScore:before.score,beforeDepth:before.depth,beforeBestmove:before.bestmove,
     score:candidate.score,depth:candidate.depth,pv:[...candidate.pv],source}};
-  return reviewSacrifice(engine,chess,before,reviewed,move,options);
+  return reviewSacrifice(engine,chess,before,await reviewRanking(engine,chess,before,reviewed,move,options),move,options);
 }

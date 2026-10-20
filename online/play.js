@@ -15,7 +15,7 @@ let me,game,roomId=new URL(location.href).searchParams.get('room'),inviteToken=n
 let mode='confirm';try{mode=localStorage.getItem('chessreview.move-mode')||'confirm';}catch{}
 let clockReceived=performance.now();
 let olderGames=[],historyCursor=null,latestGames=[],renderedFriends='';
-let reviewPly=null;
+let reviewPly=null,pgnFilename='friendly-chess.pgn';
 const presentedResults=new Set();
 const annotations=new BoardAnnotations($('online-board'),{isFlipped:()=>flipped,toggleButton:$('annotation-mode'),clearButton:$('annotation-clear')});
 const timeLabel=value=>value?.includes('+')?value:(value?value+'분':'시간 제한 없음');
@@ -261,7 +261,11 @@ async function openRoom(id){$('game-result-dialog').close();cleanupDrag();pendin
 function ask(title,description,fn){$('action-title').textContent=title;$('action-description').textContent=description;dialogAction=fn;showRoomDialog('action-dialog');}
 async function runButton(button,fn){if(button.disabled)return;button.disabled=true;try{await fn();}catch(error){notice(error.message,true);}finally{button.disabled=false;}}
 async function copy(text){try{await navigator.clipboard.writeText(text);notice('복사했습니다. 친구에게 보내 주세요.');}catch{notice('복사하지 못했습니다. 표시된 코드를 직접 선택해 복사해 주세요.',true);}}
-function savePgn(){if(!game?.pgn)return;const url=URL.createObjectURL(new Blob([game.pgn],{type:'application/x-chess-pgn'})),a=document.createElement('a');a.href=url;a.download='friendly-chess-'+game.id.slice(0,8)+'.pgn';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
+function savePgn(){
+  if(!game?.pgn)return;
+  pgnFilename='friendly-chess-'+game.id.slice(0,8)+'.pgn';
+  $('pgn-content').value=game.pgn;$('pgn-message').textContent='';$('pgn-dialog').showModal();
+}
 $('invite-form').onsubmit=event=>{event.preventDefault();void runButton(event.submitter,async()=>{const data=await api('games',{mode:'invite',color:$('invite-color').value,timeControl:$('invite-time').value});await openRoom(data.game.id);});};
 $('add-friend-form').onsubmit=event=>{event.preventDefault();void runButton(event.submitter,async()=>{const data=await api('friends',{friendCode:$('friend-code').value});renderFriends(data.friends);$('friend-code').value='';notice('친구 목록에 저장했습니다. 이제 이름 옆에서 대국을 신청하세요.');});};
 $('friends-list').onclick=event=>{
@@ -298,6 +302,15 @@ document.addEventListener('keydown',event=>{
   if(dialog){event.preventDefault();if(dialog.dispatchEvent(new Event('cancel',{cancelable:true})))dialog.close();}
 });
 $('download-pgn').onclick=savePgn;
+$('pgn-close').onclick=()=>$('pgn-dialog').close();
+$('pgn-copy').onclick=async()=>{
+  try{await navigator.clipboard.writeText($('pgn-content').value);$('pgn-message').textContent='PGN을 복사했습니다.';}
+  catch{$('pgn-content').focus();$('pgn-content').select();$('pgn-message').textContent='Ctrl+C로 선택된 PGN을 복사하세요.';}
+};
+$('pgn-download').onclick=()=>{
+  const url=URL.createObjectURL(new Blob([$('pgn-content').value],{type:'application/x-chess-pgn;charset=utf-8'}));
+  const anchor=document.createElement('a');anchor.href=url;anchor.download=pgnFilename;document.body.append(anchor);anchor.click();anchor.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);
+};
 for(const id of ['rematch-game','result-rematch'])$(id).onclick=event=>runButton(event.currentTarget,async()=>{
   if(game?.status!=='finished')return;
   $('rematch-game').disabled=$('result-rematch').disabled=true;

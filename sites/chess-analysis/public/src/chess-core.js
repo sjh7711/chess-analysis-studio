@@ -125,7 +125,7 @@ export const MOVE_GRADES = Object.freeze({
   inaccuracy:{label:'부정확',symbol:'?!'}, mistake:{label:'실수',symbol:'?'},
   miss:{label:'놓친 기회',symbol:'×'}, blunder:{label:'블런더',symbol:'??'},
 });
-export const GRADING_BASIS = 'Chess.com 공개 예상 승점 감소 구간: 우수한 수 0~2%p, 좋은 수 2~5%p, 부정확 5~10%p, 실수 10~20%p, 블런더 20%p 이상. 최선의 수는 엔진 1순위 또는 같은 완료 깊이에서 동일한 평가를 받은 후보입니다. 이 앱은 경계값부터 다음 등급을 적용하며, 예상 승점 환산·특수 분류·승점이 포화된 국면의 전술 손실 보정은 자체 추정입니다. 승점 감소가 작아도 최선보다 추가 주요 기물 손실이 검증되면 실수로 분류합니다. Chess.com의 레이팅별 환산식과 CAPS2 정확도 계산식은 공개되지 않아 동일한 결과를 보장하지 않습니다.';
+export const GRADING_BASIS = 'Chess.com 공개 예상 승점 감소 구간: 우수한 수 0~2%p, 좋은 수 2~5%p, 부정확 5~10%p, 실수 10~20%p, 블런더 20%p 이상. 최선의 수는 엔진 1순위 또는 같은 완료 깊이에서 동일한 평가를 받은 후보입니다. 이 앱은 경계값부터 다음 등급을 적용하며, 예상 승점 환산·특수 분류·승점이 포화된 국면의 전술 손실 보정은 자체 추정입니다. 승점 감소가 작아도 최선보다 추가 주요 기물 손실이 검증되면 실수로 분류합니다. 즉시 체크메이트를 놓치면 놓친 기회로 분류하되, 체크 후 상대의 유일한 합법 응수에 다음 수로 메이트하는 수순이 동일 깊이와 실제 대국 이력으로 검증되면 예외로 합니다. Chess.com의 레이팅별 환산식과 CAPS2 정확도 계산식은 공개되지 않아 동일한 결과를 보장하지 않습니다.';
 
 // Transparent approximation, not a claim to reproduce Chess.com's undisclosed rating model.
 export function expectedPoints(score, color = 'w') {
@@ -142,6 +142,104 @@ export function hasMoveReview(before, after, move) {
     && review.configKey===before.configKey && review.beforeDepth===before.depth && review.beforeBestmove===before.bestmove
     && sameScore(review.beforeScore,before.score) && ['cp','mate'].includes(review.score?.type) && Number.isFinite(review.score.value)
     && review.pv?.[0]===review.uci);
+}
+
+function rankingRoot(record) {
+  if(typeof record.startFen!=='string' || !Array.isArray(record.historyMoves))return null;
+  try {
+    const chess=validatePosition(record.startFen);
+    for(const uci of record.historyMoves) {
+      if(typeof uci!=='string' || !/^[a-h][1-8][a-h][1-8][qrbn]?$/.test(uci) || uciMove(chess.move(uci))!==uci)return null;
+    }
+    return chess.fen()===record.fen?chess:null;
+  } catch { return null; }
+}
+
+function sameRankingHistory(record,chess) {
+  if(!chess)return true;
+  const history=chess.history({verbose:true});
+  return chess.fen()===record.fen && record.startFen===(history[0]?.before||chess.fen())
+    && record.historyMoves.length===history.length && record.historyMoves.every((uci,index)=>uci===uciMove(history[index]));
+}
+
+function rankingPv(fen,pv,record) {
+  if(!Array.isArray(pv) || !pv.length)return null;
+  try {
+    const chess=record?rankingRoot(record):validatePosition(fen),steps=[];
+    if(!chess)return null;
+    for(const uci of pv) {
+      if(typeof uci!=='string' || !/^[a-h][1-8][a-h][1-8][qrbn]?$/.test(uci) || chess.isGameOver())return null;
+      const step=chess.move(uci);
+      if(uciMove(step)!==uci)return null;
+      steps.push(step);
+    }
+    return {chess,steps};
+  } catch { return null; }
+}
+
+function rankingEligible(before,after,move) {
+  const review=after?.moveReview,first=before?.lines?.find(line=>line.multipv===1);
+  return !!(hasMoveReview(before,after,move) && before.multipvComplete && Number.isInteger(before.depth) && before.depth>0
+    && typeof before.configKey==='string' && before.configKey && before.score.type==='cp' && review.score.type==='cp'
+    && review.source==='search' && review.depth===before.depth && before.bestmove!==uciMove(move)
+    && first?.depth===before.depth && first.pv?.[0]===before.bestmove && sameScore(first.score,before.score)
+    && scoreValue(review.score,move.color)>scoreValue(before.score,move.color) && legalMoveRecord(move)
+    && rankingPv(move.before,first.pv) && rankingPv(move.before,review.pv));
+}
+
+function rankingBinding(before,after,move,chess) {
+  const review=after?.moveReview,record=review?.rankingReview;
+  return !!(rankingEligible(before,after,move) && record?.version===1 && record.scope==='unrestricted-root'
+    && record.fen===move.before && record.afterFen===move.after && record.uci===uciMove(move)
+    && record.configKey===before.configKey && record.beforeDepth===before.depth && record.beforeBestmove===before.bestmove
+    && sameScore(record.beforeScore,before.score) && sameScore(record.playedScore,review.score)
+    && record.playedDepth===review.depth && record.playedSource===review.source
+    && Array.isArray(record.playedPv) && record.playedPv.length===review.pv.length && record.playedPv.every((uci,index)=>uci===review.pv[index])
+    && record.requestedDepth===before.depth && record.requestedMultipv===Math.min(3,before.lines.length)
+    && Number.isFinite(record.movetime) && record.movetime>0 && record.movetime<=1200
+    && record.searchMoves===null && ['complete','depth-limited','unverified'].includes(record.status)
+    && rankingRoot(record) && sameRankingHistory(record,chess));
+}
+
+function legalRankingResult(record) {
+  const result=record.result,lines=result?.lines;
+  if(!result?.multipvComplete || !Number.isInteger(result.depth) || result.depth<1
+    || !Array.isArray(lines) || lines.length!==record.requestedMultipv || !lines.length
+    || new Set(lines.map(line=>line.pv?.[0])).size!==lines.length)return false;
+  const first=lines.find(line=>line.multipv===1);
+  if(!first || first.pv?.[0]!==result.bestmove || !sameScore(first.score,result.score))return false;
+  try {
+    for(let index=0;index<lines.length;index++) {
+      const line=lines.find(item=>item.multipv===index+1);
+      if(!line || line.depth!==result.depth || !['cp','mate'].includes(line.score?.type)
+        || !Number.isFinite(line.score.value) || !Array.isArray(line.pv) || !line.pv.length)return false;
+      const branch=rankingPv(record.fen,line.pv,record);
+      if(!branch)return false;
+      const {chess,steps}=branch;
+      if(line.score.type==='mate') {
+        const winner=line.score.winner||(line.score.value>0?'w':'b');
+        if(!['w','b'].includes(winner) || !chess.isCheckmate() || chess.turn()===winner
+          || steps.filter(step=>step.color===winner).length!==Math.abs(line.score.value))return false;
+      }
+    }
+    return true;
+  } catch { return false; }
+}
+
+// This optional evidence never changes the independently stored position score
+// or the played move's original restricted-search assessment.
+export function hasRankingReview(before,after,move,chess) {
+  if(!rankingBinding(before,after,move,chess))return false;
+  const record=after.moveReview.rankingReview;
+  if(record.status==='unverified')return record.result===null;
+  if(!rankingPv(record.fen,after.moveReview.pv,record)
+    || !rankingPv(record.fen,before.lines.find(line=>line.multipv===1).pv,record))return false;
+  if(!legalRankingResult(record))return false;
+  return record.status==='complete' ? record.result.depth===record.requestedDepth : record.result.depth<record.requestedDepth;
+}
+
+export function needsRankingReview(before,after,move,chess) {
+  return rankingEligible(before,after,move) && !hasRankingReview(before,after,move,chess);
 }
 
 // A root-restricted search includes the played move. Convert its PV and mate
@@ -298,8 +396,9 @@ function gradingEvidenceSignature(before,after,move) {
   const review=after?.moveReview;
   return JSON.stringify({move:[move.before,move.after,uciMove(move),move.color,move.piece,move.captured,move.promotion],
     before:[before.score,before.depth,before.bestmove,before.configKey,before.multipvComplete,before.lines],
+    child:[after.score,after.depth,after.bestmove,after.configKey,after.multipvComplete,after.lines],
     review:review&&[review.version,review.fen,review.uci,review.configKey,review.beforeScore,review.beforeDepth,
-      review.beforeBestmove,review.score,review.depth,review.pv,review.source]});
+      review.beforeBestmove,review.score,review.depth,review.pv,review.source,review.rankingReview]});
 }
 
 function rootEvidence(before,after,move,signature=gradingEvidenceSignature(before,after,move)) {
@@ -328,7 +427,21 @@ function rootEvidence(before,after,move,signature=gradingEvidenceSignature(befor
   return result;
 }
 
-function verifiedTopCandidate(before, move, after, signature) {
+const rankingEvidenceCache=new WeakMap();
+function confirmedTopCandidate(before,after,move,signature) {
+  const cached=rankingEvidenceCache.get(move);
+  if(cached?.before===before && cached.after===after && cached.signature===signature)return cached.result;
+  const record=after?.moveReview?.rankingReview;
+  let result=false;
+  if(record?.status==='complete' && hasRankingReview(before,after,move)) {
+    const confirmation=record.result,actual=confirmation.lines.find(line=>line.pv[0]===uciMove(move));
+    result=!!actual && (confirmation.bestmove===uciMove(move) || sameScore(actual.score,confirmation.score));
+  }
+  rankingEvidenceCache.set(move,{before,after,signature,result});
+  return result;
+}
+
+function verifiedTopCandidate(before, move, after, signature=gradingEvidenceSignature(before,after,move)) {
   if (before.bestmove===uciMove(move)) return true;
   // Expected points saturate in won/lost positions. Only an actual equal root
   // score at the same completed depth establishes a second best move.
@@ -336,6 +449,9 @@ function verifiedTopCandidate(before, move, after, signature) {
   const first=before.lines?.find(line=>line.multipv===1 && line.pv?.[0]===before.bestmove && line.depth===before.depth);
   if (!first || !sameScore(first.score,before.score)) return false;
   if (before.lines.some(line=>line.depth===before.depth && line.pv?.[0]===uciMove(move) && sameScore(line.score,first.score))) return true;
+  // A separate played-only score cannot establish a centipawn tie or a new
+  // best move. Only a bound, complete unrestricted search can confirm either.
+  if(confirmedTopCandidate(before,after,move,signature))return true;
   // A third (or later) tied move can be absent from the overview's MultiPV.
   // Reuse its bound, equally deep root search only after checking the entire
   // recorded continuation. The separate child-position score is not evidence.
@@ -492,6 +608,63 @@ function missesMateInOne(move) {
   return result;
 }
 
+const forcingMateCache=new WeakMap();
+function verifiedForcingMateContinuation(before,after,move,moves,moveIndex,signature) {
+  const review=after?.moveReview,winner=move?.color,sign=winner==='w'?1:-1;
+  // Only a next-turn finish is exempt. A longer checking sequence, a quiet
+  // move, or a selected mating line among multiple replies is still a miss.
+  if(before?.score?.type!=='mate' || before.score.winner!==winner || before.score.value!==sign
+    || !before.multipvComplete || !Number.isInteger(before.depth) || before.depth<1
+    || typeof before.configKey!=='string' || !before.configKey
+    || !hasMoveReview(before,after,move) || review.depth!==before.depth
+    || !['candidate','search'].includes(review.source) || review.score.type!=='mate'
+    || review.score.winner!==winner || review.score.value!==sign*2 || review.pv.length!==3
+    || !Array.isArray(moves) || !Number.isInteger(moveIndex) || moveIndex<0 || moveIndex>=moves.length)return false;
+  const first=before.lines?.find(line=>line.multipv===1 && line.depth===before.depth
+    && line.pv?.[0]===before.bestmove && sameScore(line.score,before.score));
+  if(!first || first.pv.length!==1 || !legalMoveRecord(move))return false;
+  const historySignature=JSON.stringify(moves.slice(0,moveIndex+1).map(step=>
+    [step?.before,step?.after,step?.from,step?.to,step?.promotion]));
+  const cached=forcingMateCache.get(move);
+  if(cached?.before===before && cached.after===after && cached.moves===moves && cached.moveIndex===moveIndex
+    && cached.signature===signature && cached.historySignature===historySignature)return cached.result;
+  const result=(()=>{
+    try {
+      const current=moves[moveIndex];
+      if(current?.before!==move.before || current.after!==move.after || uciMove(current)!==uciMove(move))return false;
+      const chess=validatePosition(moves[0]?.before||move.before);
+      for(const step of moves.slice(0,moveIndex)) {
+        if(chess.isGameOver() || chess.fen()!==step.before)return false;
+        if(chess.move(uciMove(step)).after!==step.after)return false;
+      }
+      if(chess.fen()!==move.before || chess.isGameOver())return false;
+      // Full history is retained for both alternatives, so a repetition or
+      // fifty-move draw cannot be mistaken for an inevitable finish.
+      chess.move(before.bestmove);
+      if(!chess.isCheckmate() || chess.turn()===winner)return false;
+      chess.undo();
+      let ownMoves=0;
+      for(const [index,uci] of review.pv.entries()) {
+        if(chess.isGameOver())return false;
+        const turn=chess.turn();
+        if(turn!==winner) {
+          const replies=chess.moves({verbose:true});
+          if(replies.length!==1 || uciMove(replies[0])!==uci)return false;
+        }
+        const played=chess.move(uci);
+        if(index===0 && played.after!==move.after)return false;
+        if(turn===winner) {
+          ownMoves++;
+          if(!chess.isCheck())return false;
+        }
+      }
+      return chess.isCheckmate() && chess.turn()!==winner && ownMoves===Math.abs(review.score.value);
+    } catch { return false; }
+  })();
+  forcingMateCache.set(move,{before,after,moves,moveIndex,signature,historySignature,result});
+  return result;
+}
+
 function missedOpportunity(before, move, previous, previousMove, previousGrade) {
   if (!previousMove || previousMove.color===move.color || previousMove.after!==move.before
     || !hasMoveReview(previous,before,previousMove)) return false;
@@ -505,6 +678,32 @@ function missedOpportunity(before, move, previous, previousMove, previousGrade) 
   return opponentLoss>=0.10 || previousGrade?.key==='miss' && opponentLoss>=0.05;
 }
 
+function childSearchContradictsGreat(before,after,move) {
+  // A separate child score does not replace the bound root comparison. It can
+  // only withhold a special award when a completed, equally deep search gives
+  // contradictory evidence. Its legal continuation must belong to this board.
+  if(!hasMoveReview(before,after,move) || !after.multipvComplete || after.configKey!==before.configKey
+    || !Number.isInteger(after.depth) || after.depth<before.depth
+    || !['cp','mate'].includes(after.score?.type) || !Number.isFinite(after.score.value)
+    || expectedPoints(before.score,move.color)-expectedPoints(after.score,move.color)<0.02)return false;
+  const first=after.lines?.find(line=>line.multipv===1 && line.depth===after.depth
+    && line.pv?.[0]===after.bestmove && sameScore(line.score,after.score));
+  if(!first || !legalMoveRecord(move))return false;
+  try {
+    const chess=validatePosition(move.after),steps=[];
+    for(const uci of first.pv) {
+      if(chess.isGameOver())return false;
+      steps.push(chess.move(uci));
+    }
+    if(after.score.type==='mate') {
+      const winner=after.score.winner||(after.score.value>0?'w':'b');
+      if(!chess.isCheckmate() || chess.turn()===winner
+        || steps.filter(step=>step.color===winner).length!==Math.abs(after.score.value))return false;
+    }
+    return true;
+  } catch { return false; }
+}
+
 export function classifyMove(before, after, move, {previous,previousMove,previousGrade,moves,moveIndex} = {}) {
   if (!before || !after || !move) return null;
   // History arrays can be edited in place during exploration. Cache the
@@ -512,7 +711,8 @@ export function classifyMove(before, after, move, {previous,previousMove,previou
   // retain (or invent) a recapture exemption.
   const recapture=isRecapture(move,{previousMove,moves,moveIndex});
   const signature=gradingEvidenceSignature(before,after,move);
-  const mateMiss=missesMateInOne(move),candidate=verifiedTopCandidate(before,move,after,signature);
+  const mateMiss=missesMateInOne(move) && !verifiedForcingMateContinuation(before,after,move,moves,moveIndex,signature),
+    candidate=verifiedTopCandidate(before,move,after,signature);
   const cached = gradeCache.get(move);
   if (cached?.before===before && cached.after===after && cached.previous===previous
     && cached.previousMove===previousMove && cached.previousGrade===previousGrade && cached.recapture===recapture
@@ -533,15 +733,17 @@ export function classifyMove(before, after, move, {previous,previousMove,previou
     ? before.lines?.find(line=>line.multipv===2 && line.score && line.pv?.[0] && line.pv[0]!==before.bestmove && line.depth===before.depth) : null;
   if (mateMiss) {
     // Winning scores saturate at one expected point. A legally available
-    // immediate finish is still a concrete missed chance, even if the played
-    // move keeps a longer forced mate. Do not penalize mate distance generally.
+    // immediate finish is still a concrete missed chance. Only the separately
+    // verified check/unique-reply/next-turn mate is exempt; longer mates are
+    // not. Do not penalize mate distance generally.
     key='miss';severity=Math.max(2,severity);reason='한 수에 끝낼 수 있는 체크메이트 기회를 놓쳤습니다.';
   } else if (pointsLoss<0.02 && afterPoints>=0.50 && !isBookMove(move)
     && (sacrificeEvidence(move) || !recapture && newSacrificeDecision(move,reviewedSacrificeEvidence(before,after,move),previousMove))
     && !alreadyWinningWithoutSacrifice(before,move)) {
     key='brilliant'; reason='기물을 내줄 수 있는 수지만, 최선의 응수에도 유리하거나 대등한 국면을 유지합니다.';
   } else if (best && second && beforePoints-afterPoints<0.02 && beforePoints-expectedPoints(second.score,move.color)>=0.10
-    && !recapture && !onlyLegalMove(move)) {
+    && !recapture && !onlyLegalMove(move) && !childSearchContradictsGreat(before,after,move)
+    && !confirmedTopCandidate(before,after,move,signature)) {
     key='great'; reason='다른 후보보다 예상 승점을 크게 지키는 결정적인 수입니다.';
   } else if (!best && pointsLoss>=0.05 && missedOpportunity(before,move,previous,previousMove,previousGrade)) {
     key='miss'; severity=Math.max(2,severity); reason='상대의 실수로 생긴 기회를 살리지 못했습니다.';

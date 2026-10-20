@@ -57,9 +57,9 @@ export function searchOptions(depth, performance = DEFAULT_PERFORMANCE) {
 export function analysisKey(id, depth, performance, scope = 'position') {
   const options = scope === 'game' ? gameReviewOptions(depth, performance) : searchOptions(depth, performance);
   // The scope distinguishes a completed game review from an explicitly requested
-  // position search with more candidates. v5 identifies independent review
-  // workers, rather than the older internal engine-thread count policy.
-  return ['review-v5',scope,id, options.depth, options.movetime, options.multipv, options.hash, options.threads].join(':');
+  // position search with more candidates. v6 also separates reviews that can
+  // carry a history-bound, unrestricted confirmation of conflicting rankings.
+  return ['review-v6',scope,id, options.depth, options.movetime, options.multipv, options.hash, options.threads].join(':');
 }
 
 export function reviewOptions(depth, performance = DEFAULT_PERFORMANCE) {

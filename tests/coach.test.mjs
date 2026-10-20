@@ -655,3 +655,133 @@ test('a passed pawn escape keeps its immediate defensive purpose and adds the ve
   assert.match(caption,/통과 폰.*c6.*승격까지 두 칸/);
   assert.doesNotMatch(caption,/반드시|승격합니다|승리/);
 });
+
+test('a verified settled rook or queen exchange leads ahead of the transient double attack',()=>{
+  // Compact public Carlsen-Guha positions. Neutral scores isolate prose policy.
+  for(const {fen,san,pv,type,count} of [
+    {fen:'4rk2/1p3p2/p3rnp1/3pR2p/3P3P/1B4P1/PP3PK1/2R5 w - - 5 29',san:'Rxe6',pv:['e8e6','g2f3'],type:'룩',count:2},
+    {fen:'3rr3/1p3pk1/p4np1/2qp3p/5Q1P/1BP3P1/PP3PK1/3RR3 w - - 0 25',san:'Qd4',pv:['c5d4','c3d4','e8e2'],type:'퀸',count:3},
+  ]) {
+    const chess=new Chess(fen),move=chess.move(san);
+    for(const uci of pv)chess.move(uci);
+    const before=cp(0,[uciMove(move),...pv]),after=cp(0,pv);
+    const game={startFen:fen,moves:[move],positions:[fen,move.after],headers:{}},context={game,index:1};
+    const original=JSON.stringify({game,before,after}),insight=explainMove(move,before,after,context);
+    assert.match(insight.summary,new RegExp(`${type} 교환을 제안`));
+    assert.equal(insight.summary,insight.purposeFact);
+    assert.equal(describeMove(move,before,after,context).text,insight.summary);
+    assert.doesNotMatch(insight.summary,/동시에 공격|반드시|강제로/);
+    assert.match(insight.alternativeFact,new RegExp(`${type} 교환을 제안`));
+    const line=createInsightLine({...context,insight,before,after},'alternative');
+    assert.equal(line.steps.length,count);
+    assert.match(line.steps[0].explanation,new RegExp(`${type} 교환을 제안`));
+    assert.equal(line.cursor,0);assert.equal(line.base.fen(),fen);
+    assert.equal(JSON.stringify({game,before,after}),original);
+  }
+});
+
+test('a possible recapture alone, a truncated trade, or a checking move cannot erase the actual double attack',()=>{
+  const rook=new Chess('4rk2/1p3p2/p3rnp1/3pR2p/3P3P/1B4P1/PP3PK1/2R5 w - - 5 29').move('Rxe6');
+  for(const pv of [[],['f6d7'],['e8e6','g2f3','a8a1']]) {
+    const description=describeMove(rook,cp(0,[uciMove(rook)]),cp(0,pv));
+    assert.match(description.text,/e8의 룩·f6의 나이트.*동시에 공격/);
+    assert.doesNotMatch(description.text,/교환을 제안/);
+  }
+  const queen=new Chess('3rr3/1p3pk1/p4np1/2qp3p/5Q1P/1BP3P1/PP3PK1/3RR3 w - - 0 25').move('Qd4');
+  assert.doesNotMatch(describeMove(queen,cp(0,[uciMove(queen)]),cp(0,['c5d4'])).text,/교환을 제안/);
+  const check=new Chess('4r3/8/4r2k/4R3/8/8/8/6K1 w - - 0 20').move('Rxe6+');
+  const description=describeMove(check,cp(0,[uciMove(check)]),cp(0,['e8e6']));
+  assert.match(description.text,/체크/);assert.doesNotMatch(description.text,/교환을 제안/);
+  const sacrifice=acceptedSacrificeFixture(),insight=explainMove(sacrifice.move,sacrifice.before,sacrifice.after);
+  assert.match(insight.summary,/상대가 e7의 룩을 퀸으로 잡으면.*e7의 흑 퀸을 잡/);
+  assert.doesNotMatch(insight.summary,/교환을 제안/);
+});
+
+test('a new representative response replaces a stale neutral-trade purpose while keeping the completed grade and board',()=>{
+  const move=new Chess('4rk2/1p3p2/p3rnp1/3pR2p/3P3P/1B4P1/PP3PK1/2R5 w - - 5 29').move('Rxe6');
+  const game={startFen:move.before,moves:[move],positions:[move.before,move.after],headers:{}},index=1;
+  const before=cp(0,[uciMove(move),'e8e6','g2f3']),after=cp(0,['e8e6','g2f3']);
+  const insight=explainMove(move,before,after,{game,index}),context={game,index,before,after,insight};
+  assert.match(insight.summary,/룩 교환을 제안/);
+  const original=JSON.stringify({game,before,after}),originalSummary=insight.summary,score={type:'cp',value:0};
+  const result={score,depth:18,bestmove:'f6d7',multipvComplete:true,
+    lines:[{score,depth:18,multipv:1,pv:['f6d7']}],explanationIdentity:insightIdentity(context,'response')};
+  const refined=refineInsight(context,'response',result);
+  assert.match(refined.summary,/동시에 공격/);assert.doesNotMatch(refined.summary,/교환을 제안/);
+  assert.equal(refined.summary,refined.purposeFact);
+  assert.deepEqual(refined.grade,insight.grade);assert.equal(refined.evaluation,insight.evaluation);
+  assert.equal(JSON.stringify({game,before,after}),original);assert.equal(insight.summary,originalSummary);
+});
+
+test('quiet alternatives and their example moves retain newly opened defence instead of the secondary knight attack',()=>{
+  const fen='r4rk1/ppq2ppp/5n2/3pn3/5b2/2PB3P/PP1N1PP1/R1BQR1K1 w - - 0 15';
+  const move=new Chess(fen).move('Kh1'),before=cp(0,['d2f3','e5d3','d1d3']),after=cp(-300,['e5d3']);
+  const game={startFen:fen,moves:[move],positions:[fen,move.after],headers:{}},context={game,index:1};
+  const original=JSON.stringify({game,before,after}),insight=explainMove(move,before,after,context);
+  assert.match(insight.alternativeFact,/d2.*비워.*d1의 퀸.*d3의 비숍.*지키/);
+  assert.doesNotMatch(insight.alternativeFact,/e5의 나이트를 공격/);
+  const line=createInsightLine({...context,before,after,insight},'alternative');
+  assert.match(line.steps[0].explanation,/d2.*비워.*d1의 퀸.*d3의 비숍.*지키/);
+  assert.equal(JSON.stringify({game,before,after}),original);
+});
+
+test('a capture alternative keeps its immediate target ahead of its secondary attack after the capture',()=>{
+  // Synthetic: Bxb5 exchanges the knight for the bishop after ...cxb5. The
+  // resulting attack on Pc6 is not the reason to recommend that capture.
+  const move=new Chess('7k/8/2p5/1n6/2B5/8/7P/6K1 w - - 0 20').move('h3');
+  const before=cp(300,['c4b5','c6b5']),after=cp(0,['b5c3']),original=JSON.stringify({move,before,after});
+  const insight=explainMove(move,before,after);
+  assert.ok(insight.grade.severity>=1);
+  assert.match(insight.alternativeFact,/b5의 흑 나이트를 잡/);
+  assert.match(insight.summary,/b5의 흑 나이트를 잡/);
+  assert.doesNotMatch(insight.summary,/c6의 폰을 공격|공짜|무료|나이트를 얻/);
+  assert.equal(JSON.stringify({move,before,after}),original);
+});
+
+test('a newly opened legal capture and settled major-piece loss adds a factual risk even to a best grade',()=>{
+  // Synthetic, neutral scores isolate explanation from grading. Moving Re3
+  // opens Bh6-c1; ...Bxc1 Rxh8 Rxh8 leaves an uncompensated rook loss.
+  const fen='kr5r/8/7b/8/8/4R3/8/K1R5 w - - 0 20',move=new Chess(fen).move('Rh3');
+  const pv=['h6c1','h3h8','b8h8'],before=cp(0,[uciMove(move),...pv]),after=cp(0,pv);
+  const game={startFen:fen,moves:[move],positions:[fen,move.after],headers:{}},context={game,index:1};
+  const original=JSON.stringify({game,before,after}),insight=explainMove(move,before,after,context);
+  assert.equal(insight.grade.key,'best');
+  assert.match(insight.purposeFact,/h6의 비숍을 공격/);
+  assert.match(insight.summary,/비숍의 공격길이 열려.*c1의 백 룩을 잡을 수/);
+  assert.match(insight.summary,/예상 수순.*교환 후 백이 기물 점수 5점 손해/);
+  assert.equal(insight.responseFact,insight.riskFact);
+  assert.match(insight.materialFact,/백 5점 손해/);
+  const fields=fen.split(' ');fields[1]='b';
+  assert.throws(()=>new Chess(fields.join(' ')).move('Bxc1'));
+  assert.equal(new Chess(move.after).move('Bxc1').captured,'r');
+  const line=createInsightLine({...context,before,after,insight},'response');
+  assert.deepEqual(line.steps.map(step=>step.san),['Bxc1','Rxh8','Rxh8']);
+  assert.equal(line.cursor,0);assert.equal(line.base.fen(),move.after);
+  assert.equal(JSON.stringify({game,before,after}),original);
+});
+
+test('an existing attack, declined threat, unfinished recapture or compensated exchange cannot invent a newly opened loss',()=>{
+  const cases=[
+    {fen:'kr5r/8/7b/8/4R3/8/8/K1R5 w - - 0 20',san:'Rh4',pv:['h6c1','h4h8','b8h8']},
+    {fen:'kr5r/8/7b/8/8/4R3/8/K1R5 w - - 0 20',san:'Rh3',pv:['h6g7']},
+    {fen:'kr5r/8/7b/8/8/4R3/8/2RK4 w - - 0 20',san:'Rh3',pv:['h6c1']},
+    {fen:'kr5r/8/7b/8/8/4R3/8/K1R5 w - - 0 20',san:'Rh3',pv:['h6c1','h3h8','c1g5']},
+    {fen:'kr5r/8/7b/8/8/4R3/8/K1R5 w - - 0 20',san:'Rh3',pv:['h6c1','h3h8','a8a1']},
+  ];
+  for(const {fen,san,pv} of cases) {
+    const move=new Chess(fen).move(san),insight=explainMove(move,cp(0,[uciMove(move),...pv]),cp(0,pv));
+    assert.equal(insight.riskFact,'');
+    assert.doesNotMatch(insight.summary,/공격길이 열려|교환 후 백이 기물 점수 5점 손해/);
+  }
+});
+
+test('a quiet route alone is not repeated as the explanation bridging a conditional material-recovery example',()=>{
+  // Synthetic legal PV: quiet king manoeuvres do not prove a tactical purpose.
+  const move=new Chess('8/5N1k/8/5rb1/8/1K6/8/8 w - - 0 20').move('Nd8');
+  const pv=['g5d8','b3c2','h7g7','c2d3','d8g5','d3e4','f5e5','e4e5'];
+  const chess=new Chess(move.after);for(const uci of pv)chess.move(uci);
+  const insight=explainMove(move,cp(0,[uciMove(move),...pv]),cp(0,pv));
+  assert.match(insight.summary,/상대가 d8의 나이트를 비숍으로 잡으면/);
+  assert.match(insight.summary,/긴 예상 수순.*e5의 흑 룩을 잡/);
+  assert.doesNotMatch(insight.summary,/c2에 놓아|b3에서 c2로 옮깁니다|반드시|강제로/);
+});
