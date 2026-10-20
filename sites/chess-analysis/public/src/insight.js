@@ -388,6 +388,21 @@ function materialConsequence(move,line) {
   return null;
 }
 
+function laterCapturerRecovery(line,index,end) {
+  const capturer=line.moves[index];
+  let square=capturer.to,type=capturer.promotion||capturer.piece;
+  // A quiet intermediate move does not settle a trade when this same piece
+  // is actually recaptured soon afterwards in the recorded legal example.
+  for(let next=index+1;next<Math.min(line.moves.length,MAX_INSIGHT_PLIES);next++) {
+    const step=line.moves[next];
+    if(step.color!==capturer.color && step.captured===type && capturedSquare(step)===square)return next>=end?next:null;
+    if(step.color===capturer.color && step.from===square && step.piece===type) {
+      square=step.to;type=step.promotion||step.piece;
+    }
+  }
+  return null;
+}
+
 function nearMaterialLoss(move,line,context={}) {
   if(!line.complete || line.invalid || !line.moves.length)return null;
   const baseline=recaptureBaseline(move,context),before=new Chess(move.before),initial=pieces(new Chess(baseline)),sign=move.color==='w'?1:-1;
@@ -414,7 +429,9 @@ function nearMaterialLoss(move,line,context={}) {
     // the gain, even when the promotion itself did not capture anything.
     const next=line.moves[index+1],takesPromotion=promotion&&next?.captured===step.promotion
       && capturedSquare(next)===step.to;
-    const {end,incomplete}=exchangeEnd(line,takesPromotion?index+1:index);
+    let {end,incomplete}=exchangeEnd(line,takesPromotion?index+1:index);
+    const recovery=laterCapturerRecovery(line,index,end);
+    if(recovery!==null)({end,incomplete}=exchangeEnd(line,recovery));
     if(incomplete || end>MAX_INSIGHT_PLIES)continue;
     const final=pieces(new Chess(line.moves[end-1].after)),loss=start-materialBalance(final).difference*sign;
     if(loss<=0 || !promotion&&balance(initial,type)<=balance(final,type))continue;

@@ -523,7 +523,7 @@ function setInsightContent(markup) {
 
 function renderInsightDetail({game,index,insight,before,after}) {
   const move = game.moves[index-1];
-  after=assessedMoveResult(before,after,move);
+  after=assessedMoveResult(before,after,move,{moves:game.moves,moveIndex:index-1});
   $('insight-title').textContent = `${moveLabel(move)} · ${insight.grade.label}`;
   $('insight-evaluation').textContent = `${insight.lossText?insight.lossText+' · ':''}수 전 ${displayScore(before.score)} → 수 후 ${displayScore(after.score)} (${evaluationSide()} 기준)`;
   $('insight-playback').textContent = state.line ? `${state.line.title}${Number.isInteger(state.line.sourceDepth)?` · 분석 깊이 ${state.line.sourceDepth}`:''} · ${state.line.cursor} / ${state.line.steps.length}` : '';
@@ -531,7 +531,8 @@ function renderInsightDetail({game,index,insight,before,after}) {
     const selected = state.line?.reviewIndex === index && state.line.reviewKind === kind;
     const full=selected && state.line.reviewScope==='full';
     const coreLabel=kind==='sacrifice'?'희생 수락 예시':kind==='response'?'상대 응수':'최선의 수';
-    return `<section class="insight-line${selected ? ' selected-line' : ''}"><h3>${title}${selected ? `<span class="insight-selected">${full?'전체 수순 탐색':'핵심 장면 탐색'}</span>` : ''}</h3><p>${escape(fact || '저장된 분석에 탐색 가능한 수순이 없습니다. 이 국면을 다시 분석해 주세요.')}</p>${line.moves.length ? `<div class="insight-actions"><button class="button outline" data-insight-play="${kind}" data-insight-scope="core" aria-pressed="${selected&&!full}">${coreLabel} 보기 · ${line.focus.length}번 이동</button>${line.moves.length>line.focus.length?`<button class="text-button insight-full" data-insight-play="${kind}" data-insight-scope="full" aria-pressed="${full}">전체 예상 수순 보기 · ${line.moves.length}번 이동</button>`:''}</div>${line.focus.note?`<p class="insight-note">${escape(line.focus.note)}</p>`:''}${kind==='response'&&insight.riskFact?`<p class="insight-risk">장기 예상: ${escape(insight.riskFact)}</p>`:''}` : ''}</section>`;
+    const materialNote=kind==='response'?insight.materialFact||line.focus.note:line.focus.note;
+    return `<section class="insight-line${selected ? ' selected-line' : ''}"><h3>${title}${selected ? `<span class="insight-selected">${full?'전체 수순 탐색':'핵심 장면 탐색'}</span>` : ''}</h3><p>${escape(fact || '저장된 분석에 탐색 가능한 수순이 없습니다. 이 국면을 다시 분석해 주세요.')}</p>${line.moves.length ? `<div class="insight-actions"><button class="button outline" data-insight-play="${kind}" data-insight-scope="core" aria-pressed="${selected&&!full}">${coreLabel} 보기 · ${line.focus.length}번 이동</button>${line.moves.length>line.focus.length?`<button class="text-button insight-full" data-insight-play="${kind}" data-insight-scope="full" aria-pressed="${full}">전체 예상 수순 보기 · ${line.moves.length}번 이동</button>`:''}</div>${materialNote?`<p class="insight-note">${escape(materialNote)}</p>`:''}${kind==='response'&&insight.riskFact?`<p class="insight-risk">장기 예상: ${escape(insight.riskFact)}</p>`:''}` : ''}</section>`;
   };
   setInsightContent(`${insight.kind==='move'?`<p class="insight-purpose">${escape(insight.summary || insight.reason)}</p>`:''}${insight.sacrifice?section('sacrifice','상대가 희생을 받아들이면',insight.sacrifice,insight.sacrificeFact):''}${section('response',insight.grade.severity>=1?'상대가 이용하는 수':'상대의 최선 응수',insight.response,insight.responseFact)}${insight.grade.severity>=1?section('alternative','대신 둘 수 있었던 수',insight.alternative,insight.alternativeFact):''}${insight.reason && insight.kind!=='move' ? `<details class="insight-more"><summary>원래 리뷰의 판정 근거</summary><p>${escape(insight.reason)}</p></details>` : ''}`);
 }
@@ -544,7 +545,7 @@ function startInsight(kind,scope='core') {
     return;
   }
   const source=kind==='alternative'?insightContext.before:kind==='sacrifice'
-    ?insightContext.after.moveReview?.sacrificeReview?.branches?.[0]:assessedMoveResult(insightContext.before,insightContext.after,state.game.moves[insightContext.index-1]);
+    ?insightContext.after.moveReview?.sacrificeReview?.branches?.[0]:assessedMoveResult(insightContext.before,insightContext.after,state.game.moves[insightContext.index-1],{moves:state.game.moves,moveIndex:insightContext.index-1});
   const options=explanationOptions(Number($('depth').value),source?.depth,{...performanceOptions,threads:1});
   const engineKey=`sf19:${selectedEngine}:${performanceOptions.hash}:1`;
   const cached=explanationSearch.get(insightContext,kind,options,engineKey);

@@ -595,7 +595,7 @@ function earlierExchangeCapturer(moves,end,capture) {
 
 const materialValue=(fen,color)=>new Chess(fen).board().flat().filter(Boolean)
   .reduce((sum,piece)=>sum+values[piece.type]*(piece.color===color?1:-1),0);
-function nearbyExchangeLoss(move,line) {
+function nearbyExchangeLoss(move,line,majorOnly=false) {
   const moves=line.moves,initial=materialValue(move.before,move.color),snapshots=[];
   // A shared six-ply starting window makes the alternatives comparable.
   // Finish the capture, promotion, check reply and delayed recapture rather
@@ -613,7 +613,11 @@ function nearbyExchangeLoss(move,line) {
     snapshots.push({start:index+1,end,loss:initial-materialValue(last.after,move.color),
       majorLost:moves.slice(index,end).some(step=>step.color!==move.color && ['r','q'].includes(step.captured))});
   }
-  return snapshots.sort((a,b)=>b.loss-a.loss || a.end-b.end)[0]||{start:0,end:0,loss:0,majorLost:false};
+  // A later pawn-only window can have a larger cumulative deficit without
+  // containing the earlier major-piece capture. It must not mask the actual
+  // major-loss window when that is the event being assessed.
+  return snapshots.filter(snapshot=>!majorOnly || snapshot.majorLost)
+    .sort((a,b)=>b.loss-a.loss || a.end-b.end)[0]||{start:0,end:0,loss:0,majorLost:false};
 }
 
 function saturatedTacticalLoss(before,after,move,signature) {
@@ -625,13 +629,19 @@ function saturatedTacticalLoss(before,after,move,signature) {
   if(points>.15 && points<.85 || next>=points || scoreValue(before.score,move.color)-scoreValue(review.score,move.color)<50)return null;
   const evidence=rootEvidence(before,after,move,signature);
   if(!evidence || evidence.played.final.isCheckmate() || evidence.best.final.isCheckmate())return null;
-  const played=nearbyExchangeLoss(move,evidence.played),best=nearbyExchangeLoss(move,evidence.best);
+  const played=nearbyExchangeLoss(move,evidence.played,true),best=nearbyExchangeLoss(move,evidence.best);
   const bestLoss=Math.max(0,best.loss),additional=played.loss-bestLoss;
   // No near exchange in the best line is absent evidence, not a proved zero
   // against a delayed loss. Keep the clear exception of a major piece taken
   // on the opponent's very next move, with its exchange already settled.
-  if(best.start===0 && !(played.start===2 && evidence.played.moves[1]?.color!==move.color
-    && ['r','q'].includes(evidence.played.moves[1]?.captured)))return null;
+  // Capturing a pawn first must not hide an immediate queen/rook loss merely
+  // because that same exchange starts at ply one. For this added case, defer
+  // when the complete legal line contains a promotion as possible compensation.
+  const immediateMajor=evidence.played.moves[1]?.color!==move.color
+    && ['r','q'].includes(evidence.played.moves[1]?.captured);
+  const capturedThenLost=played.start===1 && move.captured
+    && !evidence.played.moves.some(step=>step.color===move.color && step.promotion);
+  if(best.start===0 && !(immediateMajor && (played.start===2 || capturedThenLost)))return null;
   // Four points is a rook given for a pawn. Smaller differences can reflect
   // deliberate exchanges and promotion timing; do not promote them to errors.
   return played.majorLost && additional>=4 ? {version:1,additional,played:{start:played.start,end:played.end,loss:played.loss},

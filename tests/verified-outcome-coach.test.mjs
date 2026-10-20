@@ -178,3 +178,26 @@ test('shallow, incomplete or distance-mismatched alternatives cannot claim a ver
   const updated=refineInsight(context,'alternative',alternate);
   assert.doesNotMatch(updated.summary,/두 수로 끝낼 수 있는 체크메이트 기회/);
 });
+
+test('a quiet intermediate move cannot freeze a temporary knight capture into a settled bishop loss',()=>{
+  // Black's bishop is captured on b5; the same white knight is then taken by
+  // c6xb5 after a queen move. The pawn trade does not end the larger exchange.
+  const {move,pv}=position('7k/8/2p5/1b6/3p4/N3P3/8/3Q3K b - - 0 30','Kg8',
+    ['Nxb5','dxe3','Qe2','cxb5']);
+  const before=cp(-900,[uciMove(move),...pv]),after=cp(-900,pv),raw=JSON.stringify({move,before,after});
+  const insight=explainMove(move,before,after);
+  assert.equal(insight.response.nearLoss,null);
+  assert.equal(insight.riskFact,'');
+  assert.doesNotMatch(insight.summary,/기물 점수 2점 손해/);
+  assert.equal(JSON.stringify({move,before,after}),raw);
+});
+
+test('a later recapture after a quiet move still reports a genuine net loss when it does not compensate the queen',()=>{
+  const {move,pv}=position('7k/8/8/8/8/2p5/8/1Q1R3K w - - 0 20','Qb2+',
+    ['cxb2','Kh2','Kg8','Rb1','Kh8','Rxb2']);
+  const insight=explainMove(move,cp(1000,[uciMove(move),...pv]),cp(1000,pv));
+  assert.equal(insight.response.nearLoss.end,6);
+  assert.equal(insight.response.nearLoss.loss,8);
+  assert.match(insight.riskFact,/b2의 백 퀸.*기물 점수 8점 손해/);
+  assert.equal(insight.response.focus.length,6);
+});
