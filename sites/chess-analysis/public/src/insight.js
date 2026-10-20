@@ -1,5 +1,5 @@
-import { Chess, classifyMove, assessedMoveResult, reviewedSacrificeEvidence, GRADING_BASIS, formatScore, gameAt, scoreValue, uciMove } from './chess-core.js';
-import { AnalysisLine, PIECE_NAMES, materialBalance, moveText } from './study.js';
+import { Chess, classifyMove, assessedMoveResult, reviewedSacrificeEvidence, sacrificeCandidates, GRADING_BASIS, formatScore, gameAt, scoreValue, uciMove } from './chess-core.js';
+import { AnalysisLine, PIECE_NAMES, cloneChess, materialBalance, moveText } from './study.js';
 
 const side = color => color === 'w' ? '백' : '흑';
 const object = type => PIECE_NAMES[type]+(type === 'n' ? '를' : '을');
@@ -7,17 +7,81 @@ export const moveTurn = move => `${side(move.color)}의 ${move.before.split(' ')
 export const moveLabel = move => `${moveTurn(move)} · ${PIECE_NAMES[move.piece]} ${move.from}에서 ${move.to}로`;
 const mateWinner = score => score?.type === 'mate' ? (scoreValue(score) > 0 ? 'w' : 'b') : null;
 
+// Explanation searches are separate from game grading. Bind their cache to
+// the original position, history and completed review, never a refined insight.
+export function insightIdentity({game,index,before,after},kind) {
+  if (!['response','alternative','sacrifice'].includes(kind) || !Number.isInteger(index) || index<1 || !before || !after) return null;
+  const move=game?.moves[index-1];
+  if (!move) return null;
+  try {
+    const afterMove=kind!=='alternative',count=afterMove?index:index-1,fen=afterMove?move.after:move.before;
+    if(gameAt(game,count).fen()!==fen)return null;
+    const signature=result=>({score:result.score,depth:result.depth,bestmove:result.bestmove,configKey:result.configKey,
+      pv:result.lines?.find(line=>line.pv?.[0]===result.bestmove)?.pv||[],moveReview:result.moveReview});
+    return JSON.stringify({version:1,kind,index,fen,startFen:game.startFen,history:game.moves.slice(0,count).map(uciMove),
+      move:{before:move.before,after:move.after,uci:uciMove(move)},before:signature(before),after:signature(after),
+      primary:signature(assessedMoveResult(before,after,move))});
+  } catch { return null; }
+}
+
+function refinedContinuation(context,kind,result) {
+  const identity=insightIdentity(context,kind),{before,after}=context,move=context.game?.moves[context.index-1];
+  if(!identity || result?.explanationIdentity!==identity || result.multipvComplete!==true || !Number.isInteger(result.depth)
+    || !Array.isArray(result.lines) || result.lines.length!==1 || !['cp','mate'].includes(result.score?.type)
+    || !Number.isFinite(result.score.value) || result.score.type==='mate' && !['w','b'].includes(result.score.winner))return null;
+  try { result=structuredClone(result); } catch { return null; }
+  const primary=assessedMoveResult(before,after,move),proof=kind==='sacrifice'?reviewedSacrificeEvidence(before,after,move):null;
+  const originalDepth=kind==='sacrifice'?proof?.branch.depth:kind==='alternative'?before.depth:Math.max(0,primary.depth-1);
+  if(!Number.isInteger(originalDepth) || result.depth<=originalDepth)return null;
+  const candidate=result.lines[0],sameScore=(a,b)=>a?.type===b?.type && a.value===b.value && (a.winner||null)===(b.winner||null);
+  if(candidate.multipv!==1 || candidate.depth!==result.depth || !sameScore(candidate.score,result.score)
+    || !Array.isArray(candidate.pv) || !candidate.pv.length || candidate.pv[0]!==result.bestmove)return null;
+  const line=continuation(gameAt(context.game,kind==='alternative'?context.index-1:context.index),result);
+  if(line.pv.length!==candidate.pv.length)return null;
+  if(kind==='sacrifice') {
+    if(!proof)return null;
+    const offers=sacrificeCandidates(move),captures=[...new Set(offers.flatMap(offer=>offer.captures))].sort();
+    const restricted=[...new Set(result.searchGoal?.restrictedMoves||[])].sort();
+    if(captures.length!==restricted.length || captures.some((capture,index)=>capture!==restricted[index]))return null;
+    const offer=offers.find(offer=>offer.captures.includes(result.bestmove));
+    if(!offer)return null;
+    const source=sacrificeLine(move,before,after,{offer,branch:{...candidate,capture:result.bestmove}},result,line);
+    return source?{...source,binding:identity,result:{...result,conditional:true,bestResponse:false}}:null;
+  }
+  if(result.searchGoal?.restrictedMoves?.length)return null;
+  const source=focusContinuation(move,line,kind==='alternative',MAX_INSIGHT_PLIES);
+  return {...source,binding:identity,result:{...result}};
+}
+
+export function refineInsight(context,kind,result) {
+  if(!context.insight)return null;
+  const source=refinedContinuation(context,kind,result);
+  if(!source)return null;
+  const {insight,before,after}=context,move=context.game.moves[context.index-1];
+  if(kind==='sacrifice')return {...insight,sacrifice:source,sacrificeFact:sacrificeExplanation(move,source)};
+  if(kind==='alternative')return {...insight,alternative:source,alternativeFact:source.pv[0]===uciMove(move)
+    ? '이 깊이에서는 실전 수와 같은 수가 추천됩니다.' : recommendedMove(source)};
+  const consequence=source.consequence;
+  let responseFact=firstMoveFact(source);
+  if(consequence && !consequence.distant && consequence.ply>1)responseFact+=` ${lossCause(move,source,consequence.capture)}`;
+  return {...insight,response:source,responseFact,riskFact:source.score.type!=='mate' && consequence?.distant?distantRisk(consequence):'',
+    materialFact:source.score.type!=='mate'?source.focus.note:''};
+}
+
 // Both branches stay anchored to the reviewed move, even when switching during playback.
-export function createInsightLine({game,index,insight,before,after}, kind, scope='core') {
+export function createInsightLine(context, kind, scope='core') {
+  const {game,index,insight,before,after}=context;
   if (!insight || !['response','alternative','sacrifice'].includes(kind) || !['core','full'].includes(scope)) return null;
   const move=game.moves[index-1];
   if (!move) return null;
   const response = kind === 'response', sacrifice=kind==='sacrifice', afterMove=response||sacrifice;
   // Revalidate the current identity instead of trusting an old explanation
   // object after a new analysis or game has replaced its source result.
-  const source = sacrifice ? sacrificeContinuation(move,before,after) : response ? insight.response : insight.alternative;
+  const selected=sacrifice?insight.sacrifice:response?insight.response:insight.alternative;
+  const source = selected?.binding ? refinedContinuation(context,kind,selected.result)
+    : sacrifice ? sacrificeContinuation(move,before,after) : selected;
   if (!source?.focus || !source.pv?.length) return null;
-  const result = sacrifice ? source.result : response ? assessedMoveResult(before,after,move) : before;
+  const result = source.binding || sacrifice ? source.result : response ? assessedMoveResult(before,after,move) : before;
   const count=scope==='core' ? source.focus.length : source.pv.length;
   const line = new AnalysisLine(gameAt(game,afterMove ? index : index-1),source.pv.slice(0,count),result);
   if (!line.steps.length) return null;
@@ -39,11 +103,11 @@ export function createInsightLine({game,index,insight,before,after}, kind, scope
 
 // Only describe a legal continuation belonging to the engine's chosen move.
 // Partial/corrupt cached PVs must never produce invented moves or tactics.
-function continuation(fen, result) {
-  const chess = new Chess(fen), moves = [];
+function continuation(position, result) {
+  const chess = typeof position==='string'?new Chess(position):cloneChess(position), moves = [];
   const candidate = result?.lines?.find(line => line.pv?.[0] === result.bestmove);
   const pv = candidate?.pv || (result?.bestmove ? [result.bestmove] : []);
-  for (const uci of pv) {
+  for (const uci of chess.isGameOver()?[]:pv) {
     try { moves.push(chess.move(uci)); } catch { break; }
     if (chess.isGameOver()) break;
   }
@@ -53,29 +117,37 @@ function continuation(fen, result) {
 function sacrificeContinuation(move,before,after) {
   const evidence=reviewedSacrificeEvidence(before,after,move);
   if (!evidence) return null;
+  return sacrificeLine(move,before,after,evidence);
+}
+
+function sacrificeLine(move,before,after,evidence,refinedResult=null,preparedLine=null) {
   const {offer,branch}=evidence;
   const primary=assessedMoveResult(before,after,move);
   if(branch.capture===primary.bestmove)return null;
-  const result={...primary,score:branch.score,depth:branch.depth,
+  const result=refinedResult||{...primary,score:branch.score,depth:branch.depth,
     bestmove:branch.capture,lines:[{...branch,multipv:1}],conditional:true,bestResponse:false};
-  const line=continuation(move.after,result),capture=line.moves[0];
+  const line=preparedLine||continuation(move.after,result),capture=line.moves[0];
   if (line.moves.length!==branch.pv.length || line.moves.length<2 || !capture?.captured
     || capture.color===move.color || capturedSquare(capture)!==offer.square || capture.captured!==offer.piece) return null;
   // A small pawn capture is not the payoff for offering a rook. Stop early
   // only at mate or a settled exchange recovering the pre-sacrifice balance.
   const sign=move.color==='w'?1:-1,initial=materialBalance(pieces(new Chess(move.before))).difference*sign;
   let payoff=null;
-  for(let index=1;index<Math.min(line.moves.length,NEAR_CONSEQUENCE_PLIES);index++) {
+  for(let index=1;index<Math.min(line.moves.length,MAX_INSIGHT_PLIES);index++) {
     const step=line.moves[index];
     if(step.color!==move.color)continue;
     if(new Chess(step.after).isCheckmate()){payoff={index,end:index+1,kind:'mate'};break;}
     if(!step.captured && !step.promotion)continue;
     const {end,incomplete}=exchangeEnd(line,index);
-    if(incomplete || end>NEAR_CONSEQUENCE_PLIES)continue;
+    if(incomplete || end>MAX_INSIGHT_PLIES)continue;
     const final=materialBalance(pieces(new Chess(line.moves[end-1].after))).difference*sign;
     if(final>=initial){payoff={index,end,kind:'material'};break;}
   }
-  const length=payoff ? payoff.end : Math.min(line.moves.length,NEAR_CONSEQUENCE_PLIES);
+  let length=payoff ? payoff.end : Math.min(line.moves.length,NEAR_CONSEQUENCE_PLIES);
+  if(!payoff && length) {
+    const tail=exchangeEnd(line,length-1);
+    if(!tail.incomplete && tail.end<=MAX_INSIGHT_PLIES)length=tail.end;
+  }
   const last=line.moves[length-1],position=new Chess(last.after);
   const incomplete=position.isCheck() || !!last.captured && position.moves({verbose:true}).some(reply=>reply.captured && capturedSquare(reply)===last.to);
   line.focus={length,incomplete,payoff,note:'상대가 이 포획을 선택한 경우의 예시이며, 다른 응수를 선택할 수도 있습니다.'};
@@ -89,17 +161,17 @@ function exampleStepComment(move) {
 }
 
 function sacrificeExplanation(move,line) {
-  if(line.focus.payoff) {
-    const payoff=line.moves[line.focus.payoff.index];
-    return `이 예시에서는 ${exampleStepComment(line.moves[1])}${payoff!==line.moves[1]?` 이어 ${moveText(payoff)}`:''}`;
-  }
   const checks=[...new Set(line.moves.slice(1,line.focus.length).filter(step=>step.color===move.color && /[+#]$/.test(step.san)).map(step=>PIECE_NAMES[step.piece]))];
   const scene=checks.length ? `기물을 바로 되찾기보다 ${checks.join('·')}의 체크로 상대 왕을 압박합니다.`
     : '이 장면에서는 내준 기물을 모두 되찾지 않습니다.';
-  const mate=line.score?.type==='mate' && mateWinner(line.score)===move.color;
+  const mate=mateWinner(line.score),value=scoreValue(line.score,move.color);
   const evaluation=mate
-    ? `이 응수에는 ${side(move.color)}이 ${Math.abs(line.score.value)}수 안에 체크메이트할 것으로 분석됩니다. 핵심 장면 뒤에도 공격이 이어지는 예상 수순입니다.`
-    : `이 응수 뒤의 평가는 ${formatScore(line.score,move.color)} (${side(move.color)} 기준)로 ${scoreValue(line.score,move.color)>=100?'유리하며':scoreValue(line.score,move.color)>=30?'조금 유리하며':'대등한 편이며'}, 기물 회수 외의 보상도 반영한 예상입니다.`;
+    ? `이 응수에는 ${side(mate)}이 ${Math.abs(line.score.value)}수 안에 체크메이트할 것으로 분석됩니다. 핵심 장면 뒤에도 ${mate===move.color?'공격이 ':''}이어지는 예상 수순입니다.`
+    : `이 응수 뒤의 평가는 ${formatScore(line.score,move.color)} (${side(move.color)} 기준)로 ${value>=100?'유리하며':value>=30?'조금 유리하며':value<=-100?'불리하며':value<=-30?'조금 불리하며':'대등한 편이며'}, ${value>=0?'기물 회수 외의 보상도':'이후 응수까지'} 반영한 예상입니다.`;
+  if(line.focus.payoff) {
+    const payoff=line.moves[line.focus.payoff.index];
+    return `이 예시에서는 ${exampleStepComment(line.moves[1])}${payoff!==line.moves[1]?` 이어 ${moveText(payoff)}`:''}${value<0?` 그러나 ${evaluation}`:''}`;
+  }
   return `${scene} ${evaluation}`;
 }
 
@@ -123,6 +195,7 @@ function recommendedMove(line) {
 // Six individual moves (three pairs) is a presentation boundary, never a
 // mistake-grading rule or a claim that the continuation is forced.
 export const NEAR_CONSEQUENCE_PLIES=6;
+export const MAX_INSIGHT_PLIES=12;
 
 function exchangeEnd(line,index) {
   let end=index+1;
@@ -154,12 +227,14 @@ function materialConsequence(move,line) {
   return null;
 }
 
-function focusContinuation(move,line,alternative=false) {
+function focusContinuation(move,line,alternative=false,maxPlies=NEAR_CONSEQUENCE_PLIES) {
   const consequence=alternative?null:materialConsequence(move,line);
-  const chosen=consequence && !consequence.distant ? consequence.ply-1 : 0;
-  const {end,incomplete}=exchangeEnd(line,chosen);
+  const mate=line.moves.findIndex((step,index)=>index<maxPlies && new Chess(step.after).isCheckmate());
+  const chosen=mate>=0?mate:consequence && (!consequence.distant || maxPlies>NEAR_CONSEQUENCE_PLIES && consequence.end<=maxPlies) ? consequence.ply-1 : 0;
+  const exchange=exchangeEnd(line,chosen),end=Math.min(exchange.end,maxPlies),incomplete=exchange.incomplete||exchange.end>maxPlies;
   let note='';
-  if(incomplete) note='후속 응수가 부족해 교환이나 체크 대응의 최종 결과는 아직 확인되지 않았습니다.';
+  if(exchange.end>maxPlies) note='핵심 장면은 체크나 교환이 이어지는 도중에 끝납니다. 뒤의 응수는 전체 수순에서 확인할 수 있습니다.';
+  else if(incomplete) note='후속 응수가 부족해 교환이나 체크 대응의 최종 결과는 아직 확인되지 않았습니다.';
   else if(end && (line.moves.slice(0,end).some(step=>step.captured) || !alternative && move.captured)) {
     const start=new Chess(move.before), final=new Chess(line.moves[end-1].after);
     const difference=(materialBalance(pieces(start)).difference-materialBalance(pieces(final)).difference)*(move.color==='w'?1:-1);
@@ -261,6 +336,14 @@ function lossCause(move,line,capture) {
   if (capture.flags.includes('e')) return `이 수로 인해 상대에게 앙파상을 허용해, ${ending}`;
   if (stationary) {
     const guards=current.attackers(square,move.color);
+    if(before.get(square)?.color===move.color && !before.attackers(square,move.color).length
+      && before.get(capture.from)?.type===capture.piece && before.get(capture.from)?.color===capture.color) {
+      try {
+        const fen=move.before.split(' ');fen[1]=capture.color;fen[3]='-';
+        const earlier=new Chess(fen.join(' ')).move(uciMove(capture));
+        if(earlier.captured===capture.captured)return `이미 공격받던 ${square}의 ${object(capture.captured)} 지키지 않아, ${ending}`;
+      } catch { /* A pseudo-attack or pinned attacker does not establish an earlier threat. */ }
+    }
     if (before.get(square)?.color===move.color && before.attackers(square,move.color).includes(move.from) && !guards.length) {
       return `이 수로 인해 ${object(capture.captured)} 지키던 ${PIECE_NAMES[move.piece]}${move.piece==='n'?'가':'이'} 자리를 떠나, ${ending}`;
     }

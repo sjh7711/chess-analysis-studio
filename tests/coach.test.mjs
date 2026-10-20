@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { Chess, parseGame, uciMove } from '../src/chess-core.js';
-import { createInsightLine, describeMove, explainMove, explainMistake } from '../src/insight.js';
+import { createInsightLine, describeMove, explainMove, explainMistake, insightIdentity, refineInsight } from '../src/insight.js';
 import { SAMPLE_PGN } from '../src/sample.js';
 
 const game=parseGame(readFileSync(new URL('./fixtures/review-example.pgn',import.meta.url),'utf8'));
@@ -345,4 +345,121 @@ test('an attacking example with only a centipawn score does not invent a forced 
   assert.match(insight.sacrificeFact,/이 응수 뒤의 평가는 \+0\.50 \(흑 기준\)로 조금 유리/);
   assert.match(insight.sacrificeFact,/기물 회수 외의 보상도 반영한 예상/);
   assert.doesNotMatch(insight.sacrificeFact,/체크메이트|기물을 모두 되찾|강제로/);
+});
+
+function deeperExplanation(context,kind,pv,score={type:'cp',value:100},depth=20) {
+  return {score,depth,bestmove:pv[0],multipvComplete:true,lines:[{multipv:1,score,depth,pv}],
+    explanationIdentity:insightIdentity(context,kind),searchGoal:{depth,movetime:1000,multipv:1,
+      restrictedMoves:kind==='sacrifice'?[...context.after.moveReview.sacrificeReview.restrictedMoves]:[]}};
+}
+
+test('deeper acceptance explanations replace stale mate claims without changing game grades or the main evaluation',()=>{
+  const context=attackingSacrificeFixture(),insight=explainMove(context.move,context.before,context.after);
+  const original=JSON.stringify(context),identity=insightIdentity(context,'sacrifice');
+  assert.match(insight.sacrificeFact,/11수 안에 체크메이트/);
+  const pv=insight.sacrifice.pv.slice(0,12),result=deeperExplanation(context,'sacrifice',pv,{type:'cp',value:-1034},18);
+  const refined=refineInsight({...context,insight},'sacrifice',result);
+  assert.ok(refined);
+  assert.equal(refined.grade,insight.grade);
+  assert.equal(refined.summary,insight.summary);
+  assert.equal(refined.evaluation,insight.evaluation);
+  assert.equal(refined.response,insight.response);
+  assert.equal(refined.alternative,insight.alternative);
+  assert.match(refined.sacrificeFact,/\+10\.34 \(흑 기준\)로 유리/);
+  assert.doesNotMatch(refined.sacrificeFact,/11수|체크메이트/);
+  assert.equal(insightIdentity({...context,insight:refined},'sacrifice'),identity,'cache identity never incorporates a refined result');
+  const line=createInsightLine({...context,insight:refined},'sacrifice');
+  assert.equal(line.sourceDepth,18);
+  assert.equal(line.sourceScore.value,-1034);
+  assert.equal(line.results.get(0).score.value,-1034);
+  assert.equal(line.cursor,0);
+  assert.deepEqual(line.steps.map(step=>step.uci),pv.slice(0,line.steps.length));
+  assert.equal(JSON.stringify(context),original);
+  const worse=deeperExplanation(context,'sacrifice',pv,{type:'cp',value:200},18);
+  assert.match(refineInsight({...context,insight},'sacrifice',worse).sacrificeFact,/-2\.00 \(흑 기준\)로 불리/);
+  assert.doesNotMatch(refineInsight({...context,insight},'sacrifice',worse).sacrificeFact,/보상도 반영|대등한 편/);
+});
+
+test('refinement updates only its selected legal continuation and uses the actual completed child depth',()=>{
+  const context=acceptedSacrificeFixture(),insight=explainMove(context.move,context.before,context.after);
+  const pv=[...insight.sacrifice.pv],result=deeperExplanation(context,'response',pv,{type:'cp',value:200},16);
+  const refined=refineInsight({...context,insight},'response',result);
+  assert.ok(refined,'root depth 16 includes the played move, so child depth 16 is one ply deeper');
+  assert.equal(refined.grade,insight.grade);
+  assert.equal(refined.summary,insight.summary);
+  assert.equal(refined.sacrifice,insight.sacrifice);
+  assert.equal(refined.alternative,insight.alternative);
+  assert.match(refined.responseFact,/흑 퀸이 e7의 백 룩을 잡을 수/);
+  const line=createInsightLine({...context,insight:refined},'response','full');
+  assert.equal(line.sourceDepth,16);
+  assert.equal(line.sourceScore.value,200);
+  assert.equal(line.base.fen(),context.move.after);
+  assert.deepEqual(line.steps.map(step=>step.uci),pv);
+  result.score.value=999;
+  assert.equal(refined.response.result.score.value,200,'attached explanation snapshots do not share mutable cache objects');
+  assert.equal(refined.response.score.value,200);
+  const sameDepth=deeperExplanation(context,'response',pv,{type:'cp',value:200},15);
+  assert.equal(refineInsight({...context,insight},'response',sameDepth),null);
+  const alternative=deeperExplanation(context,'alternative',[uciMove(context.move),'a7b6']);
+  const changed=refineInsight({...context,insight},'alternative',alternative);
+  assert.match(changed.alternativeFact,/실전 수와 같은 수가 추천/);
+  assert.doesNotMatch(changed.alternativeFact,/대신.*했어야/);
+  assert.equal(changed.response,insight.response);
+  assert.equal(changed.sacrifice,insight.sacrifice);
+  const losing=refineInsight({...context,insight},'sacrifice',deeperExplanation(context,'sacrifice',pv,{type:'cp',value:-200}));
+  assert.match(losing.sacrificeFact,/e7의 흑 퀸을 잡습니다/);
+  assert.match(losing.sacrificeFact,/-2\.00 \(백 기준\)로 불리/,'a short material gain must not hide a worse deeper evaluation');
+});
+
+test('refinement rejects stale identities, partial iterations, mismatched candidates and illegal suffixes',()=>{
+  const context=acceptedSacrificeFixture(),insight=explainMove(context.move,context.before,context.after);
+  const result=deeperExplanation(context,'response',insight.sacrifice.pv);
+  const mutations=[
+    r=>{r.explanationIdentity='another position';},r=>{r.multipvComplete=false;},
+    r=>{r.lines[0].score={type:'cp',value:999};},r=>{r.lines[0].depth=19;},
+    r=>{r.lines[0].multipv=2;},r=>{r.lines.push({...r.lines[0],multipv:2});},
+    r=>{r.bestmove='a7b6';},r=>{r.lines[0].pv.push('a8h1');},
+    r=>{r.searchGoal.restrictedMoves=['d6e7'];},
+  ];
+  for(const mutate of mutations) {
+    const changed=structuredClone(result);mutate(changed);
+    assert.equal(refineInsight({...context,insight},'response',changed),null);
+  }
+  const refined=refineInsight({...context,insight},'response',result);
+  const stale=structuredClone(context);stale.before.configKey='new options';
+  assert.equal(createInsightLine({...stale,insight:refined},'response'),null);
+  const capture=deeperExplanation(context,'sacrifice',insight.sacrifice.pv);
+  capture.searchGoal.restrictedMoves=[];
+  assert.equal(refineInsight({...context,insight},'sacrifice',capture),null);
+});
+
+test('a refined PV cannot continue after a repetition reached through the original game history',()=>{
+  const game=parseGame('1. Nf3 Nf6 2. Ng1 Ng8 3. Nf3 Nf6 4. Ng1 *');
+  const move=game.moves.at(-1),before=cp(0,[uciMove(move)]),after=cp(0,['f6g8']);
+  const context={game,index:game.moves.length,move,before,after},insight=explainMove(move,before,after);
+  const pv=['f6g8','g1f3','g8f6','f3g1','f6g8','g1f3'];
+  const fresh=new Chess(move.after);
+  for(const uci of pv)fresh.move(uci);
+  assert.equal(refineInsight({...context,insight},'response',deeperExplanation(context,'response',pv)),null,
+    'the same legal moves exceed the claim endpoint once real history is restored');
+});
+
+test('a verified material payoff beyond six plies can extend the key example without opening the whole line',()=>{
+  const context=acceptedSacrificeFixture(),chess=new Chess(context.move.after);
+  const pv=['Qxe7','Nc6+','Kb6','Na5','Ka7','Nc6+','Kb6','Nxe7','Rhg8','Ka2'].map(san=>uciMove(chess.move(san)));
+  context.after.moveReview.sacrificeReview.branches[0].pv=pv;
+  const insight=explainMove(context.move,context.before,context.after),core=createInsightLine({...context,insight},'sacrifice');
+  assert.equal(core.steps.length,8);
+  assert.equal(core.fullLength,10);
+  assert.equal(core.steps.at(-1).san,'Nxe7');
+  assert.match(insight.sacrificeFact,/e7의 흑 퀸을 잡습니다/);
+  assert.equal(core.cursor,0);
+});
+
+test('an already hanging piece is not described as newly exposed by an unrelated king move',()=>{
+  const chess=new Chess('k6r/8/8/8/7Q/8/8/4K3 w - - 0 15'),move=chess.move('Kf1');
+  const description=describeMove(move,cp(0,['h4e4']),cp(-800,['h8h4']));
+  assert.match(description.text,/이미 공격받던 h4의 퀸을 지키지 않아/);
+  assert.match(description.text,/흑 룩이 h4의 백 퀸을 잡을 수/);
+  assert.doesNotMatch(description.text,/이 수로 인해.*수비 없이|새로.*공격/);
 });

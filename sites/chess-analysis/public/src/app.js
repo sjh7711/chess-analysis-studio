@@ -6,7 +6,8 @@ import { pieceSvg, pieceSnapshot, pieceTransitions, StepNavigation, capturedPiec
 import { BoardAnnotations } from './annotations.js';
 import { SAMPLE_PGN } from './sample.js';
 import { AnalysisLine, PlaybackClock, PIECE_NAMES, cloneChess, editedPosition, materialBalance, exportLine, restoreResults, moveText } from './study.js';
-import { createInsightLine, describeMove, explainMove, moveLabel, moveTurn } from './insight.js';
+import { createInsightLine, describeMove, explainMove, refineInsight, moveLabel, moveTurn } from './insight.js';
+import { ExplanationSearch, explanationOptions } from './explanation-search.js';
 import { completionAlerts } from './notification-center.js';
 import { MoveSounds } from './move-sounds.js';
 
@@ -17,6 +18,8 @@ const STORAGE = 'chessreview.v1';
 const LIBRARY = 'chessreview.library.v1';
 let removedGame = null, exportFilename = 'chess-review.pgn', insightContext = null, insightMarkup = '', recommendationMarkup = '';
 let coachCache=null, coachExpanded=null;
+const explanationSearch=new ExplanationSearch();
+let explanationReady=null;
 let moveListScroll=0, restoreMoveListScroll=false;
 let renderedBoard=null, renderedFlipped=false, editorPieceId=0;
 const pieceMotions=new Map();
@@ -108,16 +111,21 @@ function createEngine(run) {
 
 function stopJob() {
   if (state.playing) playback.hold();
+  if(state.mode==='explanation' && state.line?.explanationSnapshot)state.line.refinementStatus='심층 확인 중단 · 현재 설명을 유지합니다';
   completionAlerts.cancel();
   generation++;
   clearTimeout(debounce);
   engine?.cancel();
+  explanationReady=null;
   state.mode = null;
   $('engine-download').hidden = true;
 }
 
 function scheduleAnalysis(autoReview = false) {
   if (state.mode === 'full' || state.editor) return;
+  // A bulb is a frozen, verified example. Advancing it does not need another
+  // MultiPV search of every displayed child position.
+  if (state.line?.explanationSnapshot) { schedulePlayback(); return; }
   stopJob();
   renderAnalysis();
   if (state.line) renderStudy();
@@ -132,6 +140,8 @@ function scheduleAnalysis(autoReview = false) {
 
 async function analyzeCurrent(force = false) {
   if (state.mode === 'full' || state.editor) return;
+  if (state.line?.explanationSnapshot && !force) { schedulePlayback(); return; }
+  if (force && state.line) state.line.explanationSnapshot=false;
   const cached=currentResult(),position=state.line?.cursor??state.index,results=state.line?state.line.results:state.results;
   const move=state.line?state.line.steps[position-1]:state.game.moves[position-1],before=results.get(position-1);
   const needsReview=move && isCached(before) && !hasMoveReview(before,cached,move);
@@ -324,14 +334,16 @@ function renderCoach() {
     $('coach-explain').setAttribute('aria-label','수 설명 닫기');
     $('coach-explanation-controls').hidden=false;
     const depthLabel=Number.isInteger(line?.sourceDepth)?` · 깊이 ${line.sourceDepth}`:'';
-    $('coach-scene').textContent=line?`${conditional?'가정한 수락 분기':line.reviewKind==='alternative'?'대안 수순':'상대 응수'}${depthLabel} · ${line.cursor} / ${line.steps.length}`:'수의 목적과 판정 이유';
-    $('coach-scene').title=line?'깊이는 이 설명에 사용한 엔진의 완료 탐색 깊이입니다. 화면에서 재생하는 이동 개수와 다릅니다.':'';
+    $('coach-scene').textContent=line?`${conditional?'가정한 수락 분기':line.reviewKind==='alternative'?'대안 수순':'상대 응수'}${depthLabel} · ${line.cursor} / ${line.steps.length}${line.refinementStatus?`\n${line.refinementStatus}`:''}`:'수의 목적과 판정 이유';
+    $('coach-scene').title=line?`깊이는 이 설명 근거의 실제 완료 탐색 깊이이며 재생 이동 개수와 다릅니다.${line.sourceScore?` 이 설명 분기 평가: ${displayScore(line.sourceScore)} (${evaluationSide()} 기준).`:''} 대국의 원래 등급과 점수는 유지됩니다.`:'';
     $('coach-prev').hidden=$('coach-next').hidden=!line;
+    $('coach-refine').hidden=explanationReady?.line!==line;
     $('coach-prev').disabled=!line || line.cursor===0;
     $('coach-next').disabled=!line || line.cursor===line.steps.length;
     return;
   }
   $('coach-explanation-controls').hidden=true;
+  $('coach-refine').hidden=true;
   $('coach-explain').setAttribute('aria-expanded','false');
   $('coach-explain').setAttribute('aria-label','이 수 설명');
   const cursor=state.line ? state.line.cursor : state.index;
@@ -358,7 +370,7 @@ function renderCoach() {
 
 function renderAnalysis() {
   const result = shownResult();
-  const busy = !!state.mode;
+  const busy = !!state.mode && state.mode!=='explanation';
   $('engine-status-dot').className = `status-dot${state.error ? ' error' : busy ? ' busy' : ''}`;
   $('engine-name').textContent = ENGINES[selectedEngine].name;
   $('engine-settings-open').title = `엔진 및 성능 설정 · ${performanceOptions.threads} 스레드 · ${performanceOptions.multipv} 라인 · ${performanceOptions.hash} MB`;
@@ -408,7 +420,7 @@ function renderAnalysis() {
     }).join('');
     setRecommendationContent(markup);
   } else {
-    const markup=`<p class="empty-text">${escape(result?.terminal || (state.mode === 'full' ? '이 국면의 분석 차례를 기다리고 있습니다.' : state.error || '분석 중 · 완료 후 추천 수를 표시합니다.'))}</p>`;
+    const markup=`<p class="empty-text">${escape(result?.terminal || (state.line?.explanationSnapshot ? '이 장면의 추천 수는 현재 국면 재분석으로 확인하세요.' : state.mode === 'full' ? '이 국면의 분석 차례를 기다리고 있습니다.' : state.error || '분석 중 · 완료 후 추천 수를 표시합니다.'))}</p>`;
     setRecommendationContent(markup);
   }
   $('pv-lines').setAttribute('aria-busy',String(busy));
@@ -513,14 +525,50 @@ function renderInsightDetail({game,index,insight,before,after}) {
 
 function startInsight(kind,scope='core') {
   if (!insightContext || state.game !== insightContext.game || !['response','alternative','sacrifice'].includes(kind)) return;
-  const line = createInsightLine(insightContext,kind,scope);
+  const source=kind==='alternative'?insightContext.before:kind==='sacrifice'
+    ?insightContext.after.moveReview?.sacrificeReview?.branches?.[0]:assessedMoveResult(insightContext.before,insightContext.after,state.game.moves[insightContext.index-1]);
+  const options=explanationOptions(Number($('depth').value),source?.depth,performanceOptions);
+  const engineKey=`sf19:${selectedEngine}:${performanceOptions.hash}:${performanceOptions.threads}`;
+  const cached=explanationSearch.get(insightContext,kind,options,engineKey);
+  const updated=cached && refineInsight(insightContext,kind,cached);
+  const context=updated?{...insightContext,insight:updated}:insightContext;
+  const line = createInsightLine(context,kind,scope);
   if (!line) return;
+  line.explanationSnapshot=true;
+  line.refinementStatus=cached?(updated?`심층 확인 완료 · 깊이 ${cached.depth}${cached.goalReached?'':' · 시간 내 도달 깊이'}`:'시간 내 추가 깊이에 도달하지 못해 기존 설명을 유지합니다'):'';
   line.seek(1);
   pausePlayback(); stopJob();
   coachExpanded=null;
+  insightContext=context;
   state.line = line; state.selected = null; state.tab = 'study';
+  state.error=null;
   state.chartMode = 'line';
-  renderAll(); scheduleAnalysis();
+  renderAll();
+  if (!cached) void deepenExplanation(context,kind,options,engineKey,line);
+}
+
+async function deepenExplanation(context,kind,options,engineKey,line) {
+  const run=generation;
+  line.refinementStatus='심층 확인 중 · 현재 장면은 유지됩니다';
+  state.mode='explanation';
+  renderAnalysis();renderStudy();
+  try {
+    engine=createEngine(run);
+    const result=await explanationSearch.refine(engine,context,kind,options,engineKey);
+    if (run!==generation || state.line!==line || state.game!==context.game) return;
+    const insight=refineInsight(context,kind,result);
+    if (insight) {
+      explanationReady={line,context:{...context,insight},kind,result};
+      line.refinementStatus=`심층 설명 준비 · 깊이 ${result.depth}${result.goalReached?'':' · 시간 내 도달 깊이'}`;
+    } else line.refinementStatus='추가 근거가 충분하지 않아 기존 설명을 유지합니다';
+  } catch(error) {
+    if (run===generation && error.name!=='AbortError' && state.line===line) line.refinementStatus='심층 확인을 마치지 못해 기존 설명을 유지합니다';
+  } finally {
+    if(run===generation) {
+      state.mode=null;
+      renderAnalysis();renderStudy();schedulePlayback();
+    }
+  }
 }
 
 function closeCoachExplanation() {
@@ -528,6 +576,13 @@ function closeCoachExplanation() {
   coachExpanded=null;
   if (context?.game===state.game) navigate(context.index);
   $('coach-explain').focus({preventScroll:true});
+}
+
+function leaveExplanationSnapshot() {
+  if(!state.line?.explanationSnapshot)return;
+  state.index=state.line.reviewIndex;
+  state.line=null;state.selected=null;state.tab='moves';state.chartMode='game';
+  coachExpanded=null;insightContext=null;
 }
 
 function openCoachExplanation() {
@@ -551,7 +606,8 @@ function renderChart() {
   const count = branch ? branch.steps.length+1 : state.game.positions.length;
   $('chart-start').textContent = branch ? '탐색 시작' : '시작';
   $('chart-last').textContent = branch ? `${branch.steps.length}번 이동` : state.game.moves.length ? `${state.game.moves.length}번 이동` : '현재 국면';
-  $('chart-status').textContent = `${evaluationSide()} 기준 · ${state.editor ? '배치 편집 중' : state.mode==='full' ? '전체 대국 분석 중' : results.size===count ? '분석 완료' : `${results.size}/${count} 국면 분석`}`;
+  $('chart-status').textContent = branch?.explanationSnapshot ? `설명 수순 · 근거 깊이 ${branch.sourceDepth}`
+    : `${evaluationSide()} 기준 · ${state.editor ? '배치 편집 중' : state.mode==='full' ? '전체 대국 분석 중' : results.size===count ? '분석 완료' : `${results.size}/${count} 국면 분석`}`;
   $('chart-status').title = evaluationHint();
   $('chart-top-label').textContent = `${evaluationSide()} 우세`;
   $('chart-bottom-label').textContent = `${state.flipped ? '백' : '흑'} 우세`;
@@ -607,7 +663,7 @@ function pausePlayback() {
 function schedulePlayback() {
   if (!state.playing || !state.line) return;
   if (state.error) pausePlayback();
-  else if (state.mode || !isCached(currentResult())) playback.hold();
+  else if (!state.line.explanationSnapshot && (state.mode || !isCached(currentResult()))) playback.hold();
   else playback.ready(Number($('playback-speed').value));
   renderStudy();
 }
@@ -673,7 +729,8 @@ function seekLine(index, keepPlaying = false,{analyze=true}={}) {
   if (!state.line || state.editor) return;
   const previous=state.line.cursor;
   if (!keepPlaying) pausePlayback();
-  stopJob(); state.line.seek(index); state.selected = null; state.tab = 'study';
+  if(!state.line.explanationSnapshot)stopJob();
+  state.line.seek(index); state.selected = null; state.tab = 'study';
   renderAll(); if(analyze)scheduleAnalysis();
   if(Math.abs(state.line.cursor-previous)===1)void moveSounds.play(state.line.cursor>previous?state.line.steps[state.line.cursor-1]:{});
 }
@@ -708,7 +765,7 @@ function playMove(uci) {
     const line = state.line || new AnalysisLine(currentChess(),[],currentResult());
     const move=line.play(uci);
     line.kind = 'manual';
-    for(const key of ['title','reviewKind','reviewScope','fullLength','focusNote'])delete line[key];
+    for(const key of ['title','reviewKind','reviewScope','fullLength','focusNote','explanationSnapshot','refinementStatus'])delete line[key];
     state.line = line; state.selected = null; state.error = null; state.tab = 'study';
     state.chartMode = 'line';
     renderAll(); scheduleAnalysis();
@@ -807,7 +864,9 @@ function renderStudy() {
   $('study-review').hidden = line.reviewIndex == null;
   const ended = line.cursor === line.steps.length;
   const seconds=Number($('playback-speed').value)/1000;
-  $('playback-phase').textContent=state.playing
+  $('playback-phase').textContent=line.explanationSnapshot
+    ? state.playing ? `설명 수순 재생 중 · ${seconds}초마다 다음 수` : '설명 수순 · 재생은 직접 시작합니다'
+    : state.playing
     ? state.line.cursor===0 && pieceMotions.size ? '재생 시작 위치로 이동 중…' : playback.phase==='reading' ? `분석 완료 · ${seconds}초 확인 후 다음 수` : `현재 수 분석 중 · 완료 후 ${seconds}초간 결과 표시`
     : state.error ? '현재 국면을 분석하지 못했습니다. 다시 분석해 주세요.'
     : state.mode || !isCached(currentResult()) ? '현재 국면 분석 중 · 자동으로 재생하지 않습니다.'
@@ -910,6 +969,12 @@ $('coach-explain').onclick=openCoachExplanation;
 $('coach-prev').onclick=()=>{if(state.line)seekLine(state.line.cursor-1);};
 $('coach-next').onclick=()=>{if(state.line)seekLine(state.line.cursor+1);};
 $('coach-done').onclick=closeCoachExplanation;
+$('coach-refine').onclick=()=>{
+  const ready=explanationReady;
+  if(!ready || state.line!==ready.line || state.game!==ready.context.game)return;
+  insightContext=ready.context;
+  startInsight(ready.kind,ready.line.reviewScope||'core');
+};
 $('study-review').onclick=()=>{const index=state.line?.reviewIndex;if(index!=null)navigate(index);};
 $('promotion-options').addEventListener('click', event => { const button = event.target.closest('[data-promote]'); if (button && pendingPromotion) { const { from,to } = pendingPromotion; pendingPromotion = null; $('promotion-dialog').close(); playMove(from+to+button.dataset.promote); } });
 $('promotion-cancel').onclick = () => { pendingPromotion = null; $('promotion-dialog').close(); };
@@ -926,7 +991,7 @@ $('analyze-game').onclick = () => {
   analyzeGame(restart);
 };
 $('restart-game').onclick = () => analyzeGame(true);
-$('depth').onchange = () => { stopJob(); state.results.clear(); state.line?.results.clear(); insightContext=null; renderResults(); persist(); scheduleAnalysis(!state.line); };
+$('depth').onchange = () => { pausePlayback(); stopJob(); leaveExplanationSnapshot(); state.results.clear(); state.line?.results.clear(); insightContext=null; renderAll(); persist(); scheduleAnalysis(!state.line); };
 $('engine-settings-open').onclick = () => {
   $('engine-choice').value = selectedEngine;
   $('settings-depth').value = $('depth').value;
@@ -950,10 +1015,11 @@ $('engine-settings-form').onsubmit = event => {
   $('engine-settings-dialog').close();
   if (!changed) return;
   pausePlayback(); stopJob();
+  leaveExplanationSnapshot();
   selectedEngine=nextEngine;performanceOptions=nextPerformance;$('depth').value=nextDepth;
   state.results.clear();state.line?.results.clear();state.error=null;
   insightContext=null;
-  renderResults();persist();scheduleAnalysis();
+  renderAll();persist();scheduleAnalysis();
   toast('설정을 적용했습니다. 현재 국면을 새로 분석합니다.');
 };
 function chartNavigate(index,options) { if (state.editor) return; if (state.chartMode==='line' && state.line) seekLine(index,false,options); else navigate(index,options); }

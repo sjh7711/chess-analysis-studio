@@ -6,7 +6,7 @@ import { engineChunks } from '../src/engine-options.js';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const site = path.join(root, 'sites', 'chess-analysis');
 const dist = path.join(site, 'public');
-const modules = ['annotations', 'app', 'bootstrap', 'chess-core', 'completion-alerts', 'engine', 'engine-options', 'insight', 'move-sounds', 'notification-center', 'opening-book', 'online-nav', 'pieces', 'piece-themes', 'piece-settings', 'review', 'sample', 'study', 'theme'];
+const modules = ['annotations', 'app', 'bootstrap', 'chess-core', 'completion-alerts', 'engine', 'engine-options', 'explanation-search', 'insight', 'move-sounds', 'notification-center', 'opening-book', 'online-nav', 'pieces', 'piece-themes', 'piece-settings', 'review', 'sample', 'study', 'theme'];
 const files = [
   ['index.html', 'index.html'],
   ['styles.css', 'styles.css'],
