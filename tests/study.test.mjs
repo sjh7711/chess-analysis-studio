@@ -1,8 +1,20 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { Chess, parseGame, gameAt, positionCommand } from '../src/chess-core.js';
+import { Chess, parseGame, gameAt, positionCommand, isRecapture } from '../src/chess-core.js';
 import { AnalysisLine, describeMove, editedPosition, movementGuide, materialBalance, exportLine, restoreResults } from '../src/study.js';
 import { SAMPLE_PGN } from '../src/sample.js';
+
+test('the first explored move retains a checking-intermezzo recapture from the original history',()=>{
+  const chess=new Chess('b2r3r/k4p1p/p2q1np1/NppP4/3R1Q2/P4PPB/1PP4P/1K2R3 b - - 0 24');
+  for(const san of ['cxd4','Re7+','Kb6'])chess.move(san);
+  const original=chess.fen(),line=new AnalysisLine(chess,['f4d4']);
+  assert.equal(isRecapture(line.steps[0],line.gradingContext(0)),true);
+  assert.equal(line.gradingContext(0).moveIndex,3);
+  line.seek(0);line.play('f4e5');
+  assert.equal(isRecapture(line.steps[0],line.gradingContext(0)),false,'replacing the explored move must not retain the old recapture decision');
+  assert.equal(chess.fen(),original);
+  assert.equal(line.base.history().length,3,'grading must not append the explored move to the original prefix');
+});
 
 test('PV playback advances, rewinds and replays without changing original game',()=>{
   const chess=gameAt(parseGame(SAMPLE_PGN),59);

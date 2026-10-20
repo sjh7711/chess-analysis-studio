@@ -66,17 +66,23 @@ function displayScore(score) { return formatScore(score, evaluationColor()); }
 function displayValue(score) { return scoreValue(score, evaluationColor()); }
 function evaluationHint() { return `${evaluationSide()} 기준 (+ ${evaluationSide()} 우세, − ${state.flipped ? '백' : '흑'} 우세)`; }
 function currentResult() { return state.line ? state.line.results.get(state.line.cursor) : state.results.get(state.index); }
+function gradingHistory(moves) {
+  return state.line?.steps===moves ? state.line.gradingContext(0) : {moves,moveIndex:0};
+}
 function gradesThrough(results,moves,index) {
+  const history=gradingHistory(moves);
   let grade=null;
   for (let i=1;i<=index;i++) {
     const before=results.get(i-1),after=results.get(i),move=moves[i-1];
-    grade=hasMoveReview(before,after,move) ? classifyMove(before,after,move,{previous:results.get(i-2),previousMove:moves[i-2],previousGrade:grade}) : null;
+    const moveIndex=history.moveIndex+i-1;
+    grade=hasMoveReview(before,after,move) ? classifyMove(before,after,move,{previous:results.get(i-2),previousMove:history.moves[moveIndex-1],previousGrade:grade,moves:history.moves,moveIndex}) : null;
   }
   return grade;
 }
 function gradeAt(index) { return gradesThrough(state.results,state.game.moves,index); }
 function gradeContext(results,moves,index) {
-  return {previous:results.get(index-2),previousMove:moves[index-2],previousGrade:gradesThrough(results,moves,index-1)};
+  const history=gradingHistory(moves),moveIndex=history.moveIndex+index-1;
+  return {previous:results.get(index-2),previousMove:history.moves[moveIndex-1],previousGrade:gradesThrough(results,moves,index-1),moves:history.moves,moveIndex};
 }
 function reviewedPositionCount() { return state.game.positions.filter((_,index)=>isCached(state.results.get(index)) && (!index || hasMoveReview(state.results.get(index-1),state.results.get(index),state.game.moves[index-1]))).length; }
 function shownResult() { return state.editor ? null : currentResult(); }
@@ -317,7 +323,9 @@ function renderCoach() {
     $('coach-explain').setAttribute('aria-expanded','true');
     $('coach-explain').setAttribute('aria-label','수 설명 닫기');
     $('coach-explanation-controls').hidden=false;
-    $('coach-scene').textContent=line?`${conditional?'가정한 수락 분기':line.reviewKind==='alternative'?'대안 수순':'상대 응수'} · ${line.cursor} / ${line.steps.length}`:'수의 목적과 판정 이유';
+    const depthLabel=Number.isInteger(line?.sourceDepth)?` · 깊이 ${line.sourceDepth}`:'';
+    $('coach-scene').textContent=line?`${conditional?'가정한 수락 분기':line.reviewKind==='alternative'?'대안 수순':'상대 응수'}${depthLabel} · ${line.cursor} / ${line.steps.length}`:'수의 목적과 판정 이유';
+    $('coach-scene').title=line?'깊이는 이 설명에 사용한 엔진의 완료 탐색 깊이입니다. 화면에서 재생하는 이동 개수와 다릅니다.':'';
     $('coach-prev').hidden=$('coach-next').hidden=!line;
     $('coach-prev').disabled=!line || line.cursor===0;
     $('coach-next').disabled=!line || line.cursor===line.steps.length;
@@ -336,7 +344,8 @@ function renderCoach() {
   if (state.editor) comment={grade:null,text:'기물 배치를 적용하면 이 국면에서 둘 수 있는 수를 분석합니다.'};
   else if (!move) comment={grade:null,text:`${currentChess().turn()==='w'?'백':'흑'} 차례입니다. 추천 수순을 열거나 보드에서 수를 두어 살펴보세요.`};
   else {
-    if (!coachCache || coachCache.move!==move || coachCache.before!==before || coachCache.after!==after || coachCache.previous!==previous || coachCache.previousGrade!==context.previousGrade) coachCache={move,before,after,previous,previousGrade:context.previousGrade,comment:describeMove(move,before,after,context)};
+    const grade=classifyMove(before,after,move,context);
+    if (!coachCache || coachCache.move!==move || coachCache.before!==before || coachCache.after!==after || coachCache.previous!==previous || coachCache.previousGrade!==context.previousGrade || coachCache.grade!==grade) coachCache={move,before,after,previous,previousGrade:context.previousGrade,grade,comment:describeMove(move,before,after,context)};
     comment=coachCache.comment;
   }
   $('coach-move').textContent=state.editor ? '배치 편집' : move ? moveLabel(move) : '시작 국면';
@@ -492,7 +501,7 @@ function renderInsightDetail({game,index,insight,before,after}) {
   after=assessedMoveResult(before,after,move);
   $('insight-title').textContent = `${moveLabel(move)} · ${insight.grade.label}`;
   $('insight-evaluation').textContent = `${insight.lossText?insight.lossText+' · ':''}수 전 ${displayScore(before.score)} → 수 후 ${displayScore(after.score)} (${evaluationSide()} 기준)`;
-  $('insight-playback').textContent = state.line ? `${state.line.title} · ${state.line.cursor} / ${state.line.steps.length}` : '';
+  $('insight-playback').textContent = state.line ? `${state.line.title}${Number.isInteger(state.line.sourceDepth)?` · 분석 깊이 ${state.line.sourceDepth}`:''} · ${state.line.cursor} / ${state.line.steps.length}` : '';
   const section = (kind,title,line,fact) => {
     const selected = state.line?.reviewIndex === index && state.line.reviewKind === kind;
     const full=selected && state.line.reviewScope==='full';

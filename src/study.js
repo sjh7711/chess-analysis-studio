@@ -94,6 +94,7 @@ export function describeMove(move) {
 export class AnalysisLine {
   constructor(chess, moves = [], result = null) {
     this.base = cloneChess(chess);
+    this.prefixMoves = this.base.history({verbose:true});
     this.cursor = 0;
     this.steps = [];
     this.results = new Map(result ? [[0,result]] : []);
@@ -104,6 +105,9 @@ export class AnalysisLine {
         this.steps.push({ ...move, uci:uciMove(move), explanation:describeMove(move) });
       } catch { break; }
     }
+  }
+  gradingContext(moveIndex) {
+    return {moves:[...this.prefixMoves,...this.steps],moveIndex:this.prefixMoves.length+moveIndex};
   }
   position(index = this.cursor) {
     const chess = cloneChess(this.base);

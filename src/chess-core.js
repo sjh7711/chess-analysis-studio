@@ -309,6 +309,64 @@ function directRecapture(move, previousMove) {
     && previousMove.to===move.to && move.captured===(previousMove.promotion||previousMove.piece));
 }
 
+const legalRecordCache=new WeakMap();
+function legalMoveRecord(move) {
+  if (!move?.before || !move.after) return null;
+  const signature=[move.before,move.after,uciMove(move),move.color,move.piece,move.captured,move.promotion].join('|');
+  const cached=legalRecordCache.get(move);
+  if (cached?.signature===signature) return cached.result;
+  let result=null;
+  try {
+    const chess=validatePosition(move.before),beforeCheck=chess.isCheck();
+    const pieces=()=>new Map(chess.board().flat().filter(Boolean).map(piece=>[piece.square,piece]));
+    const beforePieces=pieces(),played=chess.move(uciMove(move));
+    if (played.after===move.after && played.color===move.color && played.piece===move.piece
+      && (played.captured||null)===(move.captured||null) && (played.promotion||null)===(move.promotion||null)) {
+      result={...played,beforeCheck,beforePieces,afterPieces:pieces()};
+    }
+  } catch { /* Incomplete or illegal records cannot prove a recapture. */ }
+  legalRecordCache.set(move,{signature,result});
+  return result;
+}
+
+function delayedRecapture(move, moves, moveIndex) {
+  if (!move?.captured || move.promotion || !Array.isArray(moves) || !Number.isInteger(moveIndex)
+    || moveIndex<1 || moveIndex>=moves.length) return false;
+  const current=moves[moveIndex];
+  if (current?.before!==move.before || current.after!==move.after || uciMove(current)!==uciMove(move)) return false;
+  const actual=legalMoveRecord(current);
+  if (!actual || actual.color!==move.color || actual.piece!==move.piece || actual.captured!==move.captured) return false;
+  const target=capturedSquare(actual),opponent=move.color==='w'?'b':'w';
+  let boundary=move.before;
+  for (let index=moveIndex-1;index>=0;index-=2) {
+    const reply=moves[index];
+    if (reply?.color!==opponent || reply.after!==boundary) return false;
+    const actualReply=legalMoveRecord(reply);
+    if (!actualReply) return false;
+    if (reply.captured && reply.to===target && (reply.promotion||reply.piece)===actual.captured) return true;
+    const middle=moves[index-1];
+    if (middle?.color!==move.color || middle.after!==reply.before) return false;
+    const actualMiddle=legalMoveRecord(middle);
+    if (!actualMiddle) return false;
+    // Only a checking intermezzo and its legal reply can delay the recapture.
+    // A quiet move starts a separate decision, regardless of elapsed moves.
+    if (!actualReply.beforeCheck) return false;
+    for (const step of [actualMiddle,actualReply]) {
+      if (step.from===target || step.to===target) return false;
+      for (const board of [step.beforePieces,step.afterPieces]) {
+        const piece=board.get(target);
+        if (piece?.color!==opponent || piece.type!==actual.captured) return false;
+      }
+    }
+    boundary=middle.before;
+  }
+  return false;
+}
+
+export function isRecapture(move, {previousMove,moves,moveIndex} = {}) {
+  return directRecapture(move,previousMove) || delayedRecapture(move,moves,moveIndex);
+}
+
 function onlyLegalMove(move) {
   if (!move.before) return false;
   try { return new Chess(move.before).moves().length===1; }
@@ -328,11 +386,15 @@ function missedOpportunity(before, move, previous, previousMove, previousGrade) 
   return opponentLoss>=0.10 || previousGrade?.key==='miss' && opponentLoss>=0.05;
 }
 
-export function classifyMove(before, after, move, {previous,previousMove,previousGrade} = {}) {
+export function classifyMove(before, after, move, {previous,previousMove,previousGrade,moves,moveIndex} = {}) {
   if (!before || !after || !move) return null;
+  // History arrays can be edited in place during exploration. Cache the
+  // derived decision as well as object identities so stale history cannot
+  // retain (or invent) a recapture exemption.
+  const recapture=isRecapture(move,{previousMove,moves,moveIndex});
   const cached = gradeCache.get(move);
   if (cached?.before===before && cached.after===after && cached.previous===previous
-    && cached.previousMove===previousMove && cached.previousGrade===previousGrade) return cached.grade;
+    && cached.previousMove===previousMove && cached.previousGrade===previousGrade && cached.recapture===recapture) return cached.grade;
   const assessed=assessedMoveResult(before,after,move);
   const sign = move.color === 'w' ? 1 : -1;
   let loss;
@@ -348,11 +410,11 @@ export function classifyMove(before, after, move, {previous,previousMove,previou
   const second=before.multipvComplete && Number.isFinite(before.depth) && before.depth>0
     ? before.lines?.find(line=>line.multipv===2 && line.score && line.pv?.[0] && line.pv[0]!==before.bestmove && line.depth===before.depth) : null;
   if (pointsLoss<0.02 && afterPoints>=0.50 && !isBookMove(move)
-    && (sacrificeEvidence(move) || newSacrificeDecision(move,reviewedSacrificeEvidence(before,after,move),previousMove))
+    && (sacrificeEvidence(move) || !recapture && newSacrificeDecision(move,reviewedSacrificeEvidence(before,after,move),previousMove))
     && !alreadyWinningWithoutSacrifice(before,move)) {
     key='brilliant'; reason='기물을 내줄 수 있는 수지만, 최선의 응수에도 유리하거나 대등한 국면을 유지합니다.';
   } else if (best && second && afterPoints>=0.45 && beforePoints-expectedPoints(second.score,move.color)>=0.10
-    && !directRecapture(move,previousMove) && !onlyLegalMove(move)) {
+    && !recapture && !onlyLegalMove(move)) {
     key='great'; reason='다른 후보보다 예상 승점을 크게 지키는 결정적인 수입니다.';
   } else if (!best && pointsLoss>=0.05 && missedOpportunity(before,move,previous,previousMove,previousGrade)) {
     key='miss'; severity=Math.max(2,severity); reason='상대의 실수로 생긴 기회를 살리지 못했습니다.';
@@ -360,7 +422,7 @@ export function classifyMove(before, after, move, {previous,previousMove,previou
     key='book'; reason='등록된 오프닝 수순에 있는 이론 수입니다.';
   }
   const grade={key,...MOVE_GRADES[key],loss,pointsLoss,severity,reason};
-  gradeCache.set(move,{before,after,previous,previousMove,previousGrade,grade});
+  gradeCache.set(move,{before,after,previous,previousMove,previousGrade,recapture,grade});
   return grade;
 }
 

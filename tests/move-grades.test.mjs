@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { Chess, DEFAULT_POSITION, classifyMove, sacrificeCandidates, sacrificeEvidence, reviewedSacrificeEvidence, expectedPoints, MOVE_GRADES, uciMove } from '../src/chess-core.js';
+import { Chess, DEFAULT_POSITION, classifyMove, isRecapture, sacrificeCandidates, sacrificeEvidence, reviewedSacrificeEvidence, expectedPoints, MOVE_GRADES, uciMove } from '../src/chess-core.js';
 const cp=(value,bestmove,lines=[])=>({score:{type:'cp',value},bestmove,lines});
 const move={from:'e2',to:'e4',color:'w'};
 const ranked=(value,best,other,otherValue,depth=16)=>({...cp(value,best),depth,multipvComplete:true,lines:[
@@ -16,6 +16,10 @@ function acceptedOffer(before,move,score,pv) {
       requestedDepth:depth,restrictedMoves:[...new Set(sacrificeCandidates(move).flatMap(offer=>offer.captures))],status:'verified',
       branches:[{capture:pv[0],score:{type:'cp',value:score},depth,pv,multipvComplete:true,
         verified:true,status:'verified',source:'search',bestResponse:false}]}}};
+}
+function playedSequence(fen,sans) {
+  const chess=new Chess(fen),moves=sans.map(san=>chess.move(san));
+  return {moves,moveIndex:moves.length-1,move:moves.at(-1),previousMove:moves.at(-2)};
 }
 
 function opportunity({color='w',original=0,offered=200,played=100,previousKey}={}) {
@@ -295,6 +299,73 @@ test('direct recaptures stay best even when every alternative loses material',()
   const before=ranked(0,uciMove(recapture),'e8f8',400);
   assert.equal(classifyMove(before,cp(0),recapture,{previousMove}).key,'best');
   assert.equal(classifyMove(before,cp(0),recapture).key,'great','capture history is necessary to recognize the recapture');
+});
+
+test('a recapture after a checking intermezzo is best rather than a fresh sacrifice of another piece',()=>{
+  const sequence=playedSequence('b2r3r/k4p1p/p2q1np1/NppP4/3R1Q2/P4PPB/1PP4P/1K2R3 b - - 0 24',
+    ['cxd4','Re7+','Kb6','Qxd4+']);
+  const {move}=sequence,before={...ranked(55,uciMove(move),'a5c4',-250,14),configKey:'recapture-test'};
+  const after=acceptedOffer(before,move,55,['b6a5','b2b4','a5a4']);
+  assert.equal(isRecapture(move,sequence),true);
+  assert.equal(isRecapture(move,{previousMove:sequence.previousMove}),false,'the immediately preceding king move alone does not reveal the recapture');
+  assert.equal(sacrificeEvidence(move),null);
+  assert.ok(reviewedSacrificeEvidence(before,after,move),'the legal knight-capture branch remains useful for explanations');
+  assert.equal(classifyMove(before,after,move,sequence).key,'best');
+});
+
+test('multiple checking intermezzi do not erase a recapture or a new sacrifice by its moving piece',()=>{
+  const sequence=playedSequence('6k1/5p1p/6N1/8/8/3B4/8/R6K b - - 0 30',
+    ['hxg6','Ra8+','Kh7','Rh8+','Kg7','Bxg6']);
+  assert.equal(isRecapture(sequence.move,sequence),true);
+  assert.equal(sacrificeEvidence(sequence.move).cost,2);
+  assert.equal(classifyMove(cp(20,uciMove(sequence.move)),cp(20),sequence.move,sequence).key,'brilliant',
+    'a fresh sacrifice by the recapturing bishop keeps priority');
+});
+
+test('quiet intermezzi and a capturer that leaves and returns do not prove a delayed recapture',()=>{
+  const quiet=playedSequence('6k1/5p1p/6N1/8/8/3B4/8/R6K b - - 0 30',['hxg6','Ra2','Kh7','Bxg6+']);
+  assert.equal(isRecapture(quiet.move,quiet),false);
+  const returning=playedSequence('8/8/6k1/7q/6N1/8/1Q6/2KB4 b - - 0 30',
+    ['Qxg4','Qb6+','Qe6','Qg1+','Qg4','Bxg4']);
+  assert.equal(isRecapture(returning.move,returning),false,'the original capturer must remain on the recapture square throughout');
+});
+
+test('delayed recapture uses the actual promoted capturer and en passant destination',()=>{
+  const promoted=playedSequence('7k/8/8/8/5R2/8/1pN5/R3R1K1 b - - 0 30',
+    ['bxa1=Q','Rh4+','Kg8','Nxa1']);
+  assert.equal(promoted.moves[0].piece,'p');assert.equal(promoted.move.captured,'q');
+  assert.equal(isRecapture(promoted.move,promoted),true);
+  const enPassant=playedSequence('6k1/8/8/8/6Pp/8/7P/R5K1 b - g3 0 30',
+    ['hxg3','Ra8+','Kh7','hxg3']);
+  assert.equal(enPassant.moves[0].flags.includes('e'),true);
+  assert.equal(isRecapture(enPassant.move,enPassant),true);
+  const currentEp=playedSequence('6k1/3p4/8/4P3/8/8/8/6K1 b - - 0 30',['d5','exd6']);
+  assert.equal(isRecapture(currentEp.move,currentEp),false,'en passant following a pawn push is not a recapture');
+  const promotion=playedSequence('R6k/rP6/8/8/5R2/8/8/6K1 b - - 0 30',
+    ['Rxa8','Rh4+','Kg8','bxa8=Q+']);
+  assert.equal(isRecapture(promotion.move,promotion),false,'a promotion keeps the existing special-move policy');
+});
+
+test('stale or unrelated history cannot invent a delayed recapture and history changes invalidate grading',()=>{
+  const sequence=playedSequence('b2r3r/k4p1p/p2q1np1/NppP4/3R1Q2/P4PPB/1PP4P/1K2R3 b - - 0 24',
+    ['cxd4','Re7+','Kb6','Qxd4+']);
+  const {move}=sequence,before={...ranked(55,uciMove(move),'a5c4',-250,14),configKey:'recapture-cache'};
+  const after=acceptedOffer(before,move,55,['b6a5','b2b4','a5a4']);
+  assert.equal(classifyMove(before,after,move,sequence).key,'best');
+  const origin=sequence.moves[0];
+  sequence.moves[0]={...origin,captured:'n'};
+  assert.equal(isRecapture(move,sequence),false);
+  assert.equal(classifyMove(before,after,move,sequence).key,'brilliant','a changed array must not reuse the old recapture grade');
+  sequence.moves[0]=origin;
+  assert.equal(classifyMove(before,after,move,sequence).key,'best');
+  assert.equal(isRecapture(move,{...sequence,moveIndex:2}),false);
+  assert.equal(isRecapture({...move,after:move.before},sequence),false);
+  const unrelated=[...sequence.moves];unrelated[1]={...unrelated[1],before:origin.before};
+  assert.equal(isRecapture(move,{...sequence,moves:unrelated}),false);
+  const mutated={...origin};sequence.moves[0]=mutated;
+  assert.equal(isRecapture(move,sequence),true);
+  mutated.after=mutated.before;
+  assert.equal(isRecapture(move,sequence),false,'editing a record in place invalidates the legal-record cache');
 });
 
 test('a forced only legal move is not a great find',()=>{

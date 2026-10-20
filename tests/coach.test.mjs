@@ -241,7 +241,8 @@ test('a verified acceptance example has its own score, a short core, and no effe
   assert.equal(core.bestResponse,false);
   assert.match(core.title,/상대가 희생을 받아들이면/);
   assert.match(core.startLabel,/희생 수락을 가정한 예시/);
-  assert.match(core.focusNote,/최선의 방어 수순과 다르며/);
+  assert.match(core.focusNote,/상대가 이 포획을 선택한 경우의 예시/);
+  assert.doesNotMatch(core.focusNote,/최선의 방어 수순과 다르/);
   assert.match(core.steps[1].explanation,/킹·e7의 퀸을 동시에 공격/);
   assert.doesNotMatch(core.steps[1].explanation,/L자로|이제 흑 차례/);
   assert.equal(core.seek(4).get('e7').type,'n');
@@ -282,6 +283,27 @@ test('the unified lightbulb preserves mistake explanations and requires complete
   assert.equal(explainMove(move,null,after),null);
   assert.equal(explainMove(move,before,null),null);
   assert.equal(explainMove(null,before,after),null);
+});
+
+test('a sacrifice capture already used by the best defence opens only the ordinary response without changing the grade or evaluation',()=>{
+  const context=acceptedSacrificeFixture(),{move,before,after}=context;
+  const previousInsight=explainMove(move,before,after),grade=previousInsight.grade;
+  const pv=after.moveReview.sacrificeReview.branches[0].pv;
+  before.lines[0].pv=[uciMove(move),...pv];
+  after.bestmove=pv[0];after.lines[0].pv=[...pv];after.moveReview.pv=[uciMove(move),...pv];
+  const original=JSON.stringify(context),insight=explainMove(move,before,after);
+  assert.deepEqual(insight.grade,grade);
+  assert.equal(insight.sacrifice,null);
+  assert.equal(insight.sacrificeFact,'');
+  assert.deepEqual(insight.response.pv,pv);
+  assert.equal(createInsightLine({...context,insight},'sacrifice'),null);
+  assert.equal(createInsightLine({...context,insight:previousInsight},'sacrifice'),null,'an older separate example cannot bypass current best-response deduplication');
+  const response=createInsightLine({...context,insight},'response');
+  assert.equal(response.steps[0].uci,pv[0]);
+  assert.equal(response.sourceScore.value,0);
+  assert.equal(after.score.value,-900);
+  assert.equal(after.moveReview.sacrificeReview.branches[0].score.value,300);
+  assert.equal(JSON.stringify(context),original);
 });
 
 function attackingSacrificeFixture(score={type:'mate',value:-11,winner:'b'}) {

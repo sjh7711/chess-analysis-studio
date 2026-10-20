@@ -54,7 +54,9 @@ function sacrificeContinuation(move,before,after) {
   const evidence=reviewedSacrificeEvidence(before,after,move);
   if (!evidence) return null;
   const {offer,branch}=evidence;
-  const result={...assessedMoveResult(before,after,move),score:branch.score,depth:branch.depth,
+  const primary=assessedMoveResult(before,after,move);
+  if(branch.capture===primary.bestmove)return null;
+  const result={...primary,score:branch.score,depth:branch.depth,
     bestmove:branch.capture,lines:[{...branch,multipv:1}],conditional:true,bestResponse:false};
   const line=continuation(move.after,result),capture=line.moves[0];
   if (line.moves.length!==branch.pv.length || line.moves.length<2 || !capture?.captured
@@ -76,7 +78,7 @@ function sacrificeContinuation(move,before,after) {
   const length=payoff ? payoff.end : Math.min(line.moves.length,NEAR_CONSEQUENCE_PLIES);
   const last=line.moves[length-1],position=new Chess(last.after);
   const incomplete=position.isCheck() || !!last.captured && position.moves({verbose:true}).some(reply=>reply.captured && capturedSquare(reply)===last.to);
-  line.focus={length,incomplete,payoff,note:'상대가 희생을 받아들였다고 가정한 예시입니다. 최선의 방어 수순과 다르며, 상대는 다른 응수를 선택할 수 있습니다.'};
+  line.focus={length,incomplete,payoff,note:'상대가 이 포획을 선택한 경우의 예시이며, 다른 응수를 선택할 수도 있습니다.'};
   line.result=result;line.offer={...offer};line.conditional=true;line.bestResponse=false;
   return line;
 }
