@@ -393,6 +393,11 @@ function saturatedTacticalLoss(before,after,move,signature) {
   if(!evidence || evidence.played.final.isCheckmate() || evidence.best.final.isCheckmate())return null;
   const played=nearbyExchangeLoss(move,evidence.played),best=nearbyExchangeLoss(move,evidence.best);
   const bestLoss=Math.max(0,best.loss),additional=played.loss-bestLoss;
+  // No near exchange in the best line is absent evidence, not a proved zero
+  // against a delayed loss. Keep the clear exception of a major piece taken
+  // on the opponent's very next move, with its exchange already settled.
+  if(best.start===0 && !(played.start===2 && evidence.played.moves[1]?.color!==move.color
+    && ['r','q'].includes(evidence.played.moves[1]?.captured)))return null;
   // Four points is a rook given for a pawn. Smaller differences can reflect
   // deliberate exchanges and promotion timing; do not promote them to errors.
   return played.majorLost && additional>=4 ? {version:1,additional,played:{start:played.start,end:played.end,loss:played.loss},

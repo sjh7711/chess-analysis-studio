@@ -1,6 +1,7 @@
 import { Chess, classifyMove, assessedMoveResult, reviewedSacrificeEvidence, sacrificeCandidates, isRecapture, GRADING_BASIS, formatScore, gameAt, scoreValue, uciMove } from './chess-core.js';
 import { AnalysisLine, PIECE_NAMES, cloneChess, materialBalance, moveText } from './study.js';
 import { positionalPawnPurpose } from './positional-purpose.js';
+import { tacticalPatterns } from './tactical-patterns.js';
 
 const side = color => color === 'w' ? '백' : '흑';
 const object = type => PIECE_NAMES[type]+(type === 'n' ? '를' : '을');
@@ -691,13 +692,24 @@ function basicMoveComment(move,context={}) {
     return `캐슬링해 왕을 ${move.to}로 옮기고 룩을 ${rook}${rank}로 꺼냅니다.`;
   }
   const targets=attackedBy(after,move.to,move.color).filter(piece=>piece.type!=='k').sort((a,b)=>VALUES[b.type]-VALUES[a.type]);
+  const tactics=tacticalPatterns(move);
   if (move.san.endsWith('+')) {
+    const skewer=tactics?.skewers[0];
+    if(skewer)return `${skewer.attackerSquare}의 ${PIECE_NAMES[skewer.attackerType]}${skewer.attackerType==='n'?'로':'으로'} 체크하면서 ${skewer.kingSquare}의 왕 뒤 ${skewer.targetSquare}의 ${PIECE_NAMES[skewer.targetType]}도 같은 공격선에 놓습니다.`;
     const valuable=targets.filter(piece=>piece.type!=='p');
     return valuable.length ? `체크하면서 ${valuable.slice(0,2).map(targetName).join('·')}도 겨냥합니다.` : moveText(move);
   }
   if (move.captured && isRecapture(move,context)) return `${targetName({square:capturedSquare(move),type:move.captured})}${move.captured==='n'?'를':'을'} 되잡습니다.`;
   if (targets.length>=2 && targets[1].type!=='p') return `${targets.slice(0,2).map(targetName).join('·')}${targets[1].type==='n'?'를':'을'} 동시에 공격합니다.`;
   if (move.captured) return moveText(move);
+  const block=tactics?.blocks.slice().sort((a,b)=>VALUES[b.protectedType]-VALUES[a.protectedType])[0];
+  if(block)return block.kind==='unpin'
+    ? `${block.blockSquare}에 ${object(move.piece)} 놓아 ${block.protectedSquare}의 ${PIECE_NAMES[block.protectedType]}에 걸린 핀을 풉니다.`
+    : `${block.blockSquare}에서 ${block.attackerSquare}의 ${PIECE_NAMES[block.attackerType]}${block.attackerType==='n'?'가':'이'} ${block.protectedSquare}의 ${object(block.protectedType)} 공격하던 길을 막습니다.`;
+  const promotionEscape=tactics?.promotionEscapes[0];
+  if(promotionEscape)return `공격받던 ${object(move.piece)} ${move.to}로 피하면서 ${promotionEscape.promotionSquare} 승격칸도 계속 지킵니다.`;
+  const discovered=tactics?.discovered.slice().sort((a,b)=>VALUES[b.targetType]-VALUES[a.targetType])[0];
+  if(discovered && (!targets[0] || VALUES[discovered.targetType]>VALUES[targets[0].type]))return `${move.from} 칸을 비워 ${discovered.attackerSquare}의 ${PIECE_NAMES[discovered.attackerType]}${discovered.attackerType==='n'?'가':'이'} ${discovered.targetSquare}의 ${object(discovered.targetType)} 공격하게 합니다.`;
   const pawnPlan=pawnPurpose(move,before,after);
   if(pawnPlan)return pawnPlan;
   const defended=pieces(after).filter(piece=>piece.color===move.color && piece.square!==move.to && piece.type!=='k'

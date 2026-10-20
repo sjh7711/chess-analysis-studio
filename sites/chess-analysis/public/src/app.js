@@ -127,7 +127,7 @@ function stopJob() {
   $('engine-download').hidden = true;
 }
 
-function scheduleAnalysis(autoReview = false) {
+function scheduleAnalysis(autoReview = false, force = false) {
   if (state.mode === 'full' || state.editor) return;
   // A bulb is a frozen, verified example. Advancing it does not need another
   // MultiPV search of every displayed child position.
@@ -137,7 +137,7 @@ function scheduleAnalysis(autoReview = false) {
   if (state.line) renderStudy();
   const game = state.game;
   debounce = setTimeout(async () => {
-    const work = analyzeCurrent();
+    const work = analyzeCurrent(force);
     const run = generation;
     await work;
     if (autoReview && run === generation && game === state.game && !state.line && !state.editor && !state.error && game.moves.length && reviewedPositionCount() < game.positions.length) analyzeGame();
@@ -1031,16 +1031,19 @@ $('engine-settings-form').onsubmit = event => {
   const nextPerformance = normalizePerformance({reviewMode:$('settings-review').value,movetime:Number($('settings-time').value),multipv:Number($('settings-lines').value),hash:Number($('settings-hash').value),threadMode:threadChoice==='auto'?'auto':'manual',threads:Number(threadChoice)}, maxThreads,logicalCores);
   const changed = configKey() !== analysisKey(nextEngine,nextDepth,nextPerformance) || nextPerformance.reviewMode !== performanceOptions.reviewMode;
   $('engine-settings-dialog').close();
-  if (!changed) {
-    if(nextPerformance.threadMode!==performanceOptions.threadMode){performanceOptions=nextPerformance;persist();renderAnalysis();}
-    return;
-  }
   pausePlayback(); stopJob();
-  leaveExplanationSnapshot();
+  if(state.line?.explanationSnapshot){
+    // Applying settings analyzes the displayed scene, including a bulb step.
+    // Detach its frozen explanation without navigating back to the game move.
+    state.line=new AnalysisLine(currentChess());
+    state.line.kind='manual';state.selected=null;state.tab='study';state.chartMode='line';
+    coachExpanded=null;
+  }
   selectedEngine=nextEngine;performanceOptions=nextPerformance;$('depth').value=nextDepth;
-  state.results.clear();state.line?.results.clear();state.error=null;
+  if(changed){state.results.clear();state.line?.results.clear();}
+  state.error=null;
   insightContext=null;
-  renderAll();persist();scheduleAnalysis();
+  renderAll();persist();scheduleAnalysis(false,true);
   toast('설정을 적용했습니다. 현재 국면을 새로 분석합니다.');
 };
 function chartNavigate(index,options) { if (state.editor) return; if (state.chartMode==='line' && state.line) seekLine(index,false,options); else navigate(index,options); }

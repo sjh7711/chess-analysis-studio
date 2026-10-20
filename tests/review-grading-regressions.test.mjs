@@ -165,6 +165,45 @@ test('promotion-capture and its recapture settle before a rook-for-pawn loss is 
   assert.equal(grade.tacticalLoss.played.end,3);
 });
 
+function delayedCaptureFixture({bestExchange=false}={}) {
+  const fen=bestExchange?'q5k1/8/8/8/8/3p4/4P3/R3K3 w - - 0 30'
+    :'q5k1/8/8/8/8/8/8/R3K3 w - - 0 30';
+  const chess=new Chess(fen),move=chess.move('Ra7');
+  const bestPv=bestExchange?['a1b1','d3e2','e1e2']:['a1b1','a8a5','e1f2'];
+  const playedPv=['a1a7','a8b8','e1f1','b8a7','f1e1'];
+  // Verify actual material facts independently of the grading helper.
+  const bestPosition=new Chess(fen),playedPosition=new Chess(fen);
+  const bestMoves=bestPv.map(uci=>bestPosition.move(uci));
+  const playedMoves=playedPv.map(uci=>playedPosition.move(uci));
+  assert.equal(playedMoves[3].captured,'r');
+  assert.equal(bestMoves.some(step=>step.captured),bestExchange);
+  if(bestExchange)assert.deepEqual(bestMoves.filter(step=>step.captured).map(step=>step.captured),['p','p']);
+  const before=result({type:'cp',value:-600},bestPv),after=result({type:'cp',value:-800},playedPv.slice(1));
+  after.moveReview={version:1,fen:move.before,uci:uciMove(move),configKey:before.configKey,
+    beforeScore:{...before.score},beforeDepth:before.depth,beforeBestmove:before.bestmove,
+    score:{...after.score},depth:before.depth,pv:playedPv,source:'search'};
+  return {move,before,after};
+}
+
+test('absence of a near exchange in the best branch is not proof of zero loss for a delayed capture',()=>{
+  const {move,before,after}=delayedCaptureFixture();
+  const grade=gradeUnchanged(move,before,after);
+  assert.equal(grade.key,'good');
+  assert.equal(grade.tacticalLoss,undefined);
+  assert.equal(grade.loss,200);
+  assert.equal(grade.pointsLoss,expectedPoints(before.score,'w')-expectedPoints(after.score,'w'));
+});
+
+test('a proved settled best-branch exchange still supports the delayed major-loss comparison',()=>{
+  const {move,before,after}=delayedCaptureFixture({bestExchange:true});
+  const grade=gradeUnchanged(move,before,after);
+  assert.equal(grade.key,'mistake');
+  assert.equal(grade.tacticalLoss.additional,5);
+  assert.deepEqual(grade.tacticalLoss.best,{start:2,end:3,loss:0});
+  assert.deepEqual(grade.tacticalLoss.played,{start:4,end:4,loss:5});
+  assert.equal(grade.pointsLoss,expectedPoints(before.score,'w')-expectedPoints(after.score,'w'));
+});
+
 test('a compensated queen recapture, an unproved suffix and a remote capture cannot invent a major loss',()=>{
   const moves=['a1a7','a8a7','f2a7','g8f7'];
   const chess=new Chess('q5k1/8/8/8/8/8/5B2/R3K3 w - - 0 30'),move=chess.move(moves[0]);
