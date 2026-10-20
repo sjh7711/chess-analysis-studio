@@ -404,13 +404,13 @@ function laterCapturerRecovery(line,index,end) {
 }
 
 function nearMaterialLoss(move,line,context={}) {
-  if(!line.complete || line.invalid || !line.moves.length)return null;
+  if(!line.complete || line.invalid || !line.moves.length)return {loss:null,recoveryEnd:0};
   const baseline=recaptureBaseline(move,context),before=new Chess(move.before),initial=pieces(new Chess(baseline)),sign=move.color==='w'?1:-1;
   const start=materialBalance(initial).difference*sign;
   const replyStart=materialBalance(pieces(new Chess(move.after))).difference*sign;
   const balance=(list,type)=>list.filter(piece=>VALUES[piece.type]===VALUES[type]&&piece.color===move.color).length
     -list.filter(piece=>VALUES[piece.type]===VALUES[type]&&piece.color!==move.color).length;
-  const found=[];
+  const found=[];let recoveryEnd=0;
   for(let index=0;index<Math.min(line.moves.length,NEAR_CONSEQUENCE_PLIES);index++) {
     const step=line.moves[index];
     if(step.color===move.color || !step.captured&&!step.promotion)continue;
@@ -431,14 +431,17 @@ function nearMaterialLoss(move,line,context={}) {
       && capturedSquare(next)===step.to;
     let {end,incomplete}=exchangeEnd(line,takesPromotion?index+1:index);
     const recovery=laterCapturerRecovery(line,index,end);
-    if(recovery!==null)({end,incomplete}=exchangeEnd(line,recovery));
+    if(recovery!==null) {
+      ({end,incomplete}=exchangeEnd(line,recovery));
+      recoveryEnd=Math.max(recoveryEnd,end);
+    }
     if(incomplete || end>MAX_INSIGHT_PLIES)continue;
     const final=pieces(new Chess(line.moves[end-1].after)),loss=start-materialBalance(final).difference*sign;
     if(loss<=0 || !promotion&&balance(initial,type)<=balance(final,type))continue;
     found.push({capture:step,ply:index+1,end,loss,replyLoss:replyStart-materialBalance(final).difference*sign,
       includesPriorCapture:baseline!==move.before,distant:false,kind:promotion?'promotion':'material'});
   }
-  return found.sort((a,b)=>b.loss-a.loss || VALUES[b.capture.captured||'p']-VALUES[a.capture.captured||'p'] || a.ply-b.ply)[0]||null;
+  return {loss:found.sort((a,b)=>b.loss-a.loss || VALUES[b.capture.captured||'p']-VALUES[a.capture.captured||'p'] || a.ply-b.ply)[0]||null,recoveryEnd};
 }
 
 function verifiedMate(line) {
@@ -529,18 +532,18 @@ function recaptureBaseline(move,context={}) {
 
 function focusContinuation(move,line,alternative=false,maxPlies=NEAR_CONSEQUENCE_PLIES,context={}) {
   const consequence=alternative?null:materialConsequence(move,line);
-  const nearLoss=alternative?null:nearMaterialLoss(move,line,context);
+  const {loss:nearLoss,recoveryEnd}=alternative?{loss:null,recoveryEnd:0}:nearMaterialLoss(move,line,context);
   const offer=!alternative && line.moves[0]?.captured ? sacrificeCandidates(move).find(offer=>offer.captures.includes(line.pv[0])) : null;
   const payoff=offer?compensationPayoff(move,line):null;
   const purposePayoff=alternative?quietAlternativePayoff(line):null;
   const trade=alternative?neutralExchange(line.moves[0],{...line,moves:line.moves.slice(1)},context):null;
   const limit=payoff?MAX_INSIGHT_PLIES:maxPlies;
   const mate=line.moves.findIndex((step,index)=>index<limit && new Chess(step.after).isCheckmate());
-  const chosen=mate>=0?mate:payoff?payoff.index:purposePayoff?purposePayoff.index:trade?trade.end-1:nearLoss?nearLoss.end-1:consequence && (!consequence.distant || maxPlies>NEAR_CONSEQUENCE_PLIES && consequence.end<=maxPlies) ? consequence.ply-1 : 0;
+  const chosen=mate>=0?mate:payoff?payoff.index:purposePayoff?purposePayoff.index:trade?trade.end-1:nearLoss?nearLoss.end-1:recoveryEnd?recoveryEnd-1:consequence && (!consequence.distant || maxPlies>NEAR_CONSEQUENCE_PLIES && consequence.end<=maxPlies) ? consequence.ply-1 : 0;
   const exchange=exchangeEnd(line,chosen);
   // Complete a nearby tactical exchange, including a checking intermezzo,
   // rather than reporting the temporary material balance at the six-ply cut.
-  const exchangeLimit=nearLoss || consequence && !consequence.distant?MAX_INSIGHT_PLIES:limit;
+  const exchangeLimit=nearLoss || recoveryEnd || consequence && !consequence.distant?MAX_INSIGHT_PLIES:limit;
   const end=Math.min(exchange.end,exchangeLimit),incomplete=exchange.incomplete||exchange.end>exchangeLimit;
   let note='';
   if(mate>=0)note=`이 예상 수순에서는 ${mateFact(line.moves[mate])}`;
@@ -555,6 +558,7 @@ function focusContinuation(move,line,alternative=false,maxPlies=NEAR_CONSEQUENCE
   }
   line.focus={length:end,note,incomplete,payoff};
   if(purposePayoff)line.focus.purposePayoff=purposePayoff;
+  if(recoveryEnd)line.focus.recoveredExchange=true;
   if(offer)line.offer={...offer};
   line.consequence=consequence;
   line.nearLoss=nearLoss;
@@ -631,7 +635,7 @@ export function explainMove(move,before,after,context={}) {
     response,responseFact:opponentMate?mateFact:primaryFact||mateFact||openedRisk||firstMoveFact(response),alternative,
     alternativeFact:alternative.focus.purposePayoff || ['exchange','discovered-defense','block','unpin'].includes(alternativeCoach?.kind)
       ?alternativeCoach.text:recommendedMove(alternative),
-    sacrifice,sacrificeFact,riskFact:opponentMate?mateFact:openedRisk,materialFact:openedRisk?nearMaterialNote(response):'',lossText:'이 수의 의미',
+    sacrifice,sacrificeFact,riskFact:opponentMate?mateFact:openedRisk,materialFact:openedRisk||response.focus.recoveredExchange?nearMaterialNote(response):'',lossText:'이 수의 의미',
     evaluation:`수 전 ${formatScore(before.score)} → 수 후 ${formatScore(assessed.score)} (백 기준)`,basis:GRADING_BASIS};
 }
 

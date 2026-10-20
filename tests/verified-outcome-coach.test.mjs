@@ -182,14 +182,22 @@ test('shallow, incomplete or distance-mismatched alternatives cannot claim a ver
 test('a quiet intermediate move cannot freeze a temporary knight capture into a settled bishop loss',()=>{
   // Black's bishop is captured on b5; the same white knight is then taken by
   // c6xb5 after a queen move. The pawn trade does not end the larger exchange.
-  const {move,pv}=position('7k/8/2p5/1b6/3p4/N3P3/8/3Q3K b - - 0 30','Kg8',
-    ['Nxb5','dxe3','Qe2','cxb5']);
-  const before=cp(-900,[uciMove(move),...pv]),after=cp(-900,pv),raw=JSON.stringify({move,before,after});
-  const insight=explainMove(move,before,after);
+  const context=position('7k/8/2p5/1b6/3p4/N3P3/8/3Q3K b - - 0 30','Kg8',
+    ['Nxb5','dxe3','Qe2','cxb5','Kh2']);
+  const {move,pv}=context,before=cp(-900,[uciMove(move),...pv]),after=cp(-900,pv),raw=JSON.stringify({context,before,after});
+  const insight=explainMove(move,before,after,context);
   assert.equal(insight.response.nearLoss,null);
   assert.equal(insight.riskFact,'');
   assert.doesNotMatch(insight.summary,/기물 점수 2점 손해/);
-  assert.equal(JSON.stringify({move,before,after}),raw);
+  assert.match(insight.materialFact,/흑 1점 이득/);
+  assert.equal(insight.response.focus.length,4);
+  assert.equal(insight.response.focus.incomplete,false);
+  assert.match(insight.response.focus.note,/흑 1점 이득/);
+  const core=createInsightLine({...context,before,after,insight},'response');
+  assert.deepEqual(core.steps.map(step=>step.san),['Nxb5','dxe3','Qe2','cxb5']);
+  assert.match(core.focusNote,/흑 1점 이득/);
+  assert.equal(core.cursor,0);assert.equal(core.base.fen(),move.after);
+  assert.equal(JSON.stringify({context,before,after}),raw);
 });
 
 test('a later recapture after a quiet move still reports a genuine net loss when it does not compensate the queen',()=>{
