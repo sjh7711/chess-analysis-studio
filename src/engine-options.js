@@ -2,6 +2,8 @@ export const ENGINES = Object.freeze({
   lite: { name: 'Stockfish 19 Lite', worker: '/engine/stockfish-19-lite-single.js', parallelWorker: '/engine/stockfish-19-lite.js' },
   full: { name: 'Stockfish 19', worker: '/engine/stockfish-19-single.js', parallelWorker: '/engine/stockfish-19.js' },
 });
+export const DEFAULT_ENGINE_ID = 'full';
+export const REVIEW_ENGINE_ID = 'full';
 export const FULL_ENGINE_SIZE = 99102793;
 export const ENGINE_CHUNK_SIZE = 20 * 1024 * 1024;
 export function engineChunks(parallel = false) {
@@ -13,7 +15,7 @@ export function engineChunks(parallel = false) {
 }));
 }
 export const DEFAULT_PERFORMANCE = Object.freeze({ movetime: 0, multipv: 3, hash: 32, threads: 1, reviewMode: 'precise' });
-export function engineId(value) { return Object.keys(ENGINES).find(id => id === value || ENGINES[id].name === value) || 'lite'; }
+export function engineId(value) { return Object.keys(ENGINES).find(id => id === value || ENGINES[id].name === value) || DEFAULT_ENGINE_ID; }
 export function supportedThreads(isolated = globalThis.crossOriginIsolated, cores = globalThis.navigator?.hardwareConcurrency || 1) {
   return isolated && typeof SharedArrayBuffer !== 'undefined' ? [1, 2, 4, 8].filter(n => n <= cores).at(-1) || 1 : 1;
 }

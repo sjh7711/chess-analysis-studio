@@ -1,13 +1,14 @@
 import { Chess, parseGame, gameAt, classifyMove, hasMoveReview, assessedMoveResult, MOVE_GRADES, GRADING_BASIS, formatScore, scoreValue, pvToSan, exportPgn } from './chess-core.js';
 import { StockfishEngine } from './engine.js';
 import { reviewMove } from './review.js';
-import { ENGINES, engineId, normalizePerformance, supportedThreads, searchOptions, reviewOptions, gameReviewOptions, analysisKey } from './engine-options.js';
+import { ENGINES, DEFAULT_ENGINE_ID, REVIEW_ENGINE_ID, engineId, normalizePerformance, supportedThreads, searchOptions, reviewOptions, gameReviewOptions, analysisKey } from './engine-options.js';
 import { pieceSvg, pieceSnapshot, pieceTransitions, StepNavigation, capturedPieces, capturedMarkup } from './pieces.js';
 import { BoardAnnotations } from './annotations.js';
 import { SAMPLE_PGN } from './sample.js';
 import { AnalysisLine, PlaybackClock, PIECE_NAMES, cloneChess, editedPosition, materialBalance, exportLine, restoreResults, moveText } from './study.js';
 import { createInsightLine, describeMove, explainMove, refineInsight, moveLabel, moveTurn } from './insight.js';
 import { ExplanationSearch, explanationOptions } from './explanation-search.js';
+import { mergeExplanationLine } from './explanation-playback.js';
 import { completionAlerts } from './notification-center.js';
 import { MoveSounds } from './move-sounds.js';
 
@@ -19,14 +20,13 @@ const LIBRARY = 'chessreview.library.v1';
 let removedGame = null, exportFilename = 'chess-review.pgn', insightContext = null, insightMarkup = '', recommendationMarkup = '';
 let coachCache=null, coachExpanded=null;
 const explanationSearch=new ExplanationSearch();
-let explanationReady=null;
 let moveListScroll=0, restoreMoveListScroll=false;
 let renderedBoard=null, renderedFlipped=false, editorPieceId=0;
 const pieceMotions=new Map();
 const stepNavigation=new StepNavigation(()=>pieceMotions.size>0);
 const settings = { 12: true, 16: true, 20: true, 24: true };
 const maxThreads = supportedThreads();
-let selectedEngine = 'lite', performanceOptions = normalizePerformance({}, maxThreads);
+let selectedEngine = DEFAULT_ENGINE_ID, performanceOptions = normalizePerformance({}, maxThreads);
 const state = { game:parseGame(SAMPLE_PGN), index:59, flipped:false, results:new Map(), line:null, editor:null, playing:false, selected:null, mode:null, error:null, tab:'moves', chartMode:'game' };
 const annotations=new BoardAnnotations($('board'),{isFlipped:()=>state.flipped,enabled:()=>!state.editor,toggleButton:$('annotation-mode'),clearButton:$('annotation-clear')});
 let engine = null, engineConfig = '', generation = 0, debounce, toastTimer, pendingPromotion, draggedSquare, suppressClickUntil = 0;
@@ -42,7 +42,9 @@ try {
     state.game = parseGame(saved.input, saved.kind);
     state.index = Math.min(state.game.moves.length, Math.max(0, Number(saved.index) || 0));
     if (settings[saved.depth]) $('depth').value = saved.depth;
-    selectedEngine = engineId(saved.engine);
+    // Review always starts with full NNUE. Legacy Lite evaluations cannot be
+    // restored as if they were results from the full engine.
+    selectedEngine = REVIEW_ENGINE_ID;
     performanceOptions = normalizePerformance(saved.performance, maxThreads);
     if (saved.analysisVersion!==2) performanceOptions.reviewMode='precise';
     state.results = restoreResults(saved,state.game.positions.length,ENGINES[selectedEngine].name);
@@ -116,7 +118,6 @@ function stopJob() {
   generation++;
   clearTimeout(debounce);
   engine?.cancel();
-  explanationReady=null;
   state.mode = null;
   $('engine-download').hidden = true;
 }
@@ -187,6 +188,10 @@ async function analyzeGame(restart = false) {
   pausePlayback();
   if (state.line) { state.line = null; state.selected = null; state.chartMode = 'game'; renderBoard(); renderStudy(); }
   stopJob();
+  if(selectedEngine!==REVIEW_ENGINE_ID) {
+    selectedEngine=REVIEW_ENGINE_ID;
+    state.results.clear();insightContext=null;coachCache=null;coachExpanded=null;
+  }
   if (restart) { state.results.clear(); persist(); }
   const run = generation;
   const options = searchOptions(Number($('depth').value),performanceOptions);
@@ -337,13 +342,11 @@ function renderCoach() {
     $('coach-scene').textContent=line?`${conditional?'가정한 수락 분기':line.reviewKind==='alternative'?'대안 수순':'상대 응수'}${depthLabel} · ${line.cursor} / ${line.steps.length}${line.refinementStatus?`\n${line.refinementStatus}`:''}`:'수의 목적과 판정 이유';
     $('coach-scene').title=line?`깊이는 이 설명 근거의 실제 완료 탐색 깊이이며 재생 이동 개수와 다릅니다.${line.sourceScore?` 이 설명 분기 평가: ${displayScore(line.sourceScore)} (${evaluationSide()} 기준).`:''} 대국의 원래 등급과 점수는 유지됩니다.`:'';
     $('coach-prev').hidden=$('coach-next').hidden=!line;
-    $('coach-refine').hidden=explanationReady?.line!==line;
     $('coach-prev').disabled=!line || line.cursor===0;
     $('coach-next').disabled=!line || line.cursor===line.steps.length;
     return;
   }
   $('coach-explanation-controls').hidden=true;
-  $('coach-refine').hidden=true;
   $('coach-explain').setAttribute('aria-expanded','false');
   $('coach-explain').setAttribute('aria-label','이 수 설명');
   const cursor=state.line ? state.line.cursor : state.index;
@@ -525,6 +528,11 @@ function renderInsightDetail({game,index,insight,before,after}) {
 
 function startInsight(kind,scope='core') {
   if (!insightContext || state.game !== insightContext.game || !['response','alternative','sacrifice'].includes(kind)) return;
+  if(selectedEngine!==REVIEW_ENGINE_ID) {
+    void analyzeGame();
+    toast('Stockfish 19 정식판으로 리뷰를 시작합니다. 완료 후 수 설명을 확인하세요.');
+    return;
+  }
   const source=kind==='alternative'?insightContext.before:kind==='sacrifice'
     ?insightContext.after.moveReview?.sacrificeReview?.branches?.[0]:assessedMoveResult(insightContext.before,insightContext.after,state.game.moves[insightContext.index-1]);
   const options=explanationOptions(Number($('depth').value),source?.depth,performanceOptions);
@@ -558,17 +566,30 @@ async function deepenExplanation(context,kind,options,engineKey,line) {
     if (run!==generation || state.line!==line || state.game!==context.game) return;
     const insight=refineInsight(context,kind,result);
     if (insight) {
-      explanationReady={line,context:{...context,insight},kind,result};
-      line.refinementStatus=`심층 설명 준비 · 깊이 ${result.depth}${result.goalReached?'':' · 시간 내 도달 깊이'}`;
+      const updated={...context,insight},replacement=createInsightLine(updated,kind,line.reviewScope||'core');
+      if(replacement) {
+        line.pendingRefinement={context:updated,replacement,result};
+        if(!applyExplanationRefinement(line))line.refinementStatus=`심층 분석 완료 · 깊이 ${result.depth} · 현재 장면 유지`;
+      } else line.refinementStatus='추가 근거가 충분하지 않아 기존 설명을 유지합니다';
     } else line.refinementStatus='추가 근거가 충분하지 않아 기존 설명을 유지합니다';
   } catch(error) {
     if (run===generation && error.name!=='AbortError' && state.line===line) line.refinementStatus='심층 확인을 마치지 못해 기존 설명을 유지합니다';
   } finally {
     if(run===generation) {
       state.mode=null;
-      renderAnalysis();renderStudy();schedulePlayback();
+      renderAll();schedulePlayback();
     }
   }
+}
+
+function applyExplanationRefinement(line) {
+  const pending=line.pendingRefinement;
+  if(!pending || state.line!==line || state.game!==pending.context.game
+    || !mergeExplanationLine(line,pending.replacement))return false;
+  insightContext=pending.context;
+  line.refinementStatus=`심층 분석 자동 반영 · 깊이 ${pending.result.depth}${pending.result.goalReached?'':' · 시간 내 도달 깊이'}`;
+  delete line.pendingRefinement;
+  return true;
 }
 
 function closeCoachExplanation() {
@@ -587,6 +608,11 @@ function leaveExplanationSnapshot() {
 
 function openCoachExplanation() {
   if ($('coach-explain').getAttribute('aria-expanded')==='true') { closeCoachExplanation(); return; }
+  if(selectedEngine!==REVIEW_ENGINE_ID) {
+    void analyzeGame();
+    toast('Stockfish 19 정식판으로 리뷰를 시작합니다. 완료 후 수 설명을 확인하세요.');
+    return;
+  }
   renderInsight();
   if (!insightContext || state.line || state.editor) return;
   const {insight}=insightContext;
@@ -731,6 +757,7 @@ function seekLine(index, keepPlaying = false,{analyze=true}={}) {
   if (!keepPlaying) pausePlayback();
   if(!state.line.explanationSnapshot)stopJob();
   state.line.seek(index); state.selected = null; state.tab = 'study';
+  if(state.line.explanationSnapshot)applyExplanationRefinement(state.line);
   renderAll(); if(analyze)scheduleAnalysis();
   if(Math.abs(state.line.cursor-previous)===1)void moveSounds.play(state.line.cursor>previous?state.line.steps[state.line.cursor-1]:{});
 }
@@ -765,7 +792,7 @@ function playMove(uci) {
     const line = state.line || new AnalysisLine(currentChess(),[],currentResult());
     const move=line.play(uci);
     line.kind = 'manual';
-    for(const key of ['title','reviewKind','reviewScope','fullLength','focusNote','explanationSnapshot','refinementStatus'])delete line[key];
+    for(const key of ['title','reviewKind','reviewScope','fullLength','focusNote','explanationSnapshot','refinementStatus','pendingRefinement'])delete line[key];
     state.line = line; state.selected = null; state.error = null; state.tab = 'study';
     state.chartMode = 'line';
     renderAll(); scheduleAnalysis();
@@ -945,9 +972,10 @@ function squareClicked(square) {
 
 function setGame(game, saved = null) {
   pausePlayback(); stopJob(); state.game = game; state.index = game.moves.length; state.results = new Map(); state.line = null; state.editor = null; state.selected = null; state.error = null;
+  selectedEngine=REVIEW_ENGINE_ID;
   if(saved){
     state.index=Math.min(game.moves.length,Math.max(0,Number(saved.index)||0));
-    selectedEngine=engineId(saved.engine);performanceOptions=normalizePerformance(saved.performance,maxThreads);
+    selectedEngine=REVIEW_ENGINE_ID;performanceOptions=normalizePerformance(saved.performance,maxThreads);
     if (saved.analysisVersion!==2) performanceOptions.reviewMode='precise';
     if(settings[saved.depth])$('depth').value=saved.depth;
     state.results=restoreResults(saved,game.positions.length,ENGINES[selectedEngine].name);
@@ -969,12 +997,6 @@ $('coach-explain').onclick=openCoachExplanation;
 $('coach-prev').onclick=()=>{if(state.line)seekLine(state.line.cursor-1);};
 $('coach-next').onclick=()=>{if(state.line)seekLine(state.line.cursor+1);};
 $('coach-done').onclick=closeCoachExplanation;
-$('coach-refine').onclick=()=>{
-  const ready=explanationReady;
-  if(!ready || state.line!==ready.line || state.game!==ready.context.game)return;
-  insightContext=ready.context;
-  startInsight(ready.kind,ready.line.reviewScope||'core');
-};
 $('study-review').onclick=()=>{const index=state.line?.reviewIndex;if(index!=null)navigate(index);};
 $('promotion-options').addEventListener('click', event => { const button = event.target.closest('[data-promote]'); if (button && pendingPromotion) { const { from,to } = pendingPromotion; pendingPromotion = null; $('promotion-dialog').close(); playMove(from+to+button.dataset.promote); } });
 $('promotion-cancel').onclick = () => { pendingPromotion = null; $('promotion-dialog').close(); };

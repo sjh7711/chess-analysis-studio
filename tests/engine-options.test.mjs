@@ -1,8 +1,21 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { analysisKey, DEFAULT_PERFORMANCE, engineChunks, gameReviewOptions, normalizePerformance, reviewOptions, searchOptions, supportedThreads, workerUrl } from '../src/engine-options.js';
+import { analysisKey, DEFAULT_ENGINE_ID, DEFAULT_PERFORMANCE, ENGINES, engineChunks, engineId, gameReviewOptions, normalizePerformance, REVIEW_ENGINE_ID, reviewOptions, searchOptions, supportedThreads, workerUrl } from '../src/engine-options.js';
 import { StockfishEngine } from '../src/engine.js';
 import { restoreResults } from '../src/study.js';
+
+test('new and unrecognized engine preferences default to full while manual Lite remains selectable', () => {
+  assert.equal(DEFAULT_ENGINE_ID, 'full');
+  assert.equal(REVIEW_ENGINE_ID, 'full');
+  assert.equal(ENGINES[REVIEW_ENGINE_ID].name, 'Stockfish 19');
+  for (const value of [undefined, null, '', 'Stockfish 18', 'unknown']) {
+    assert.equal(engineId(value), DEFAULT_ENGINE_ID);
+  }
+  assert.equal(engineId('full'), 'full');
+  assert.equal(engineId('Stockfish 19'), 'full');
+  assert.equal(engineId('lite'), 'lite');
+  assert.equal(engineId('Stockfish 19 Lite'), 'lite');
+});
 
 test('performance controls map to search limits and distinguish cached evaluations', () => {
   const settings = normalizePerformance({ movetime: 10000, multipv: 5, hash: 128, threads: 4 }, 8);

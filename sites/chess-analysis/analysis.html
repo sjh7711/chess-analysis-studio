@@ -13,7 +13,7 @@
 </head>
 <body>
   <header class="topbar">
-    <div class="app-brand"><span class="app-title">체스 분석</span><button id="engine-settings-open" class="engine-settings-open" aria-label="엔진 및 성능 설정" title="엔진 및 성능 설정"><span id="engine-name">Stockfish 19 Lite</span><span aria-hidden="true">⌄</span><span class="status-dot" id="engine-status-dot" aria-hidden="true"></span></button></div>
+    <div class="app-brand"><span class="app-title">체스 분석</span><button id="engine-settings-open" class="engine-settings-open" aria-label="엔진 및 성능 설정" title="엔진 및 성능 설정"><span id="engine-name">Stockfish 19</span><span aria-hidden="true">⌄</span><span class="status-dot" id="engine-status-dot" aria-hidden="true"></span></button></div>
     <section class="game-banner" aria-label="대국 정보">
       <div class="game-identity"><div><h2 id="game-title">shinjjong <span>vs</span> imgubi</h2><p id="game-meta">Chess.com · 2026.10.03 · 60분</p></div></div>
       <div class="game-result"><span id="game-result-label">백 승리</span><strong id="game-result">1–0</strong></div>
@@ -52,7 +52,7 @@
             <div class="chart-footer"><span id="chart-start">시작</span><span id="chart-help">클릭·드래그·방향키로 수 이동</span><span id="chart-last">30수</span></div></div>
           </section>
           <section class="engine-card" aria-label="엔진 분석">
-      <section class="move-coach" aria-label="현재 수 해설"><div class="coach-heading"><span id="coach-symbol" aria-hidden="true">♟</span><h3 id="coach-move">수 설명</h3><span id="coach-grade">분석 대기</span><button id="coach-explain" class="coach-explain" aria-label="이 수 설명" title="이 수의 이유를 보드에서 살펴보기" aria-controls="coach-text coach-explanation-controls" aria-expanded="false" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18h6M10 21h4M8 13a6 6 0 1 1 8 0c-1 .8-1 1.5-1 3H9c0-1.5 0-2.2-1-3Z"/></svg></button></div><p id="coach-text" aria-live="polite" aria-atomic="true">기보에서 수를 선택하면 그 수의 의미를 설명합니다.</p><div id="coach-explanation-controls" class="coach-explanation-controls" hidden><span id="coach-scene" role="status"></span><button id="coach-prev" aria-label="설명 이전 장면" title="이전 장면">이전</button><button id="coach-next" aria-label="설명 다음 장면" title="다음 장면">다음</button><button id="coach-refine" hidden>심층 적용</button><button id="coach-done">기보로</button></div></section>
+      <section class="move-coach" aria-label="현재 수 해설"><div class="coach-heading"><span id="coach-symbol" aria-hidden="true">♟</span><h3 id="coach-move">수 설명</h3><span id="coach-grade">분석 대기</span><button id="coach-explain" class="coach-explain" aria-label="이 수 설명" title="이 수의 이유를 보드에서 살펴보기" aria-controls="coach-text coach-explanation-controls" aria-expanded="false" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18h6M10 21h4M8 13a6 6 0 1 1 8 0c-1 .8-1 1.5-1 3H9c0-1.5 0-2.2-1-3Z"/></svg></button></div><p id="coach-text" aria-live="polite" aria-atomic="true">기보에서 수를 선택하면 그 수의 의미를 설명합니다.</p><div id="coach-explanation-controls" class="coach-explanation-controls" hidden><span id="coach-scene" role="status"></span><button id="coach-prev" aria-label="설명 이전 장면" title="이전 장면">이전</button><button id="coach-next" aria-label="설명 다음 장면" title="다음 장면">다음</button><button id="coach-done">기보로</button></div></section>
       <p id="engine-download" class="engine-download" role="status" hidden></p>
       <div class="best-lines"><div class="recommendation-heading"><h3>추천 수 <small id="evaluation-basis">평가 · 백 기준</small></h3><label class="arrow-option"><input type="checkbox" id="show-arrow" checked> <span id="arrow-label">추천 수 표시</span></label></div><div id="pv-lines"><p class="empty-text">분석 중…</p></div></div>
     </section>
@@ -90,8 +90,8 @@
   <dialog id="engine-settings-dialog" class="modal engine-settings-modal" aria-labelledby="engine-settings-title">
     <form id="engine-settings-form">
       <div class="modal-heading"><h2 id="engine-settings-title">엔진 및 성능 설정</h2><button type="button" id="engine-settings-close" class="icon-button" aria-label="설정 닫기"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 6l12 12M18 6 6 18"/></svg></button></div>
-      <div class="engine-setting"><label for="engine-choice">분석 엔진</label><select id="engine-choice"><option value="lite">Stockfish 19 Lite · 약 2MB</option><option value="full">Stockfish 19 · 약 95MB</option></select></div>
-      <p class="engine-setting-note">엔진 파일은 선택한 뒤 내려받습니다.</p>
+      <div class="engine-setting"><label for="engine-choice">분석 엔진</label><select id="engine-choice"><option value="full">Stockfish 19 · 정식판 · 약 95MB</option><option value="lite">Stockfish 19 Lite · 자유 탐색용 · 약 2MB</option></select></div>
+      <p class="engine-setting-note">리뷰와 전구 설명은 Stockfish 19 정식판을 사용합니다. Lite는 현재 국면 분석과 자유 탐색에서 선택할 수 있습니다.</p>
       <div class="engine-setting"><label for="settings-depth">분석 깊이</label><select id="settings-depth"><option value="12">12 · 빠르게</option><option value="16">16 · 균형</option><option value="20">20 · 자세히</option><option value="24">24 · 깊게</option></select></div>
       <div class="engine-setting"><label for="settings-time">국면당 최대 시간</label><select id="settings-time"><option value="0">깊이에 맞게 · 0.6~5초</option><option value="500">0.5초</option><option value="1000">1초</option><option value="3000">3초</option><option value="5000">5초</option><option value="10000">10초</option><option value="30000">30초</option></select></div>
       <div class="engine-setting"><label for="settings-review">전체 대국 검토</label><select id="settings-review"><option value="precise">정밀 검토 · 권장</option><option value="fast">빠른 검토</option></select></div>

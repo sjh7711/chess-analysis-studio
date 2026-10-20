@@ -404,7 +404,6 @@ main{width:100%;flex:none;padding-bottom:24px}
 .coach-explanation-controls{display:flex;align-items:center;gap:5px;margin-top:6px;flex:none;font-size:11px}
 .coach-explanation-controls[hidden]{display:none}
 .coach-explanation-controls>span{flex:1;min-width:0;line-height:1.3;white-space:pre-line}
-.coach-explanation-controls #coach-refine{background:var(--ui-primary,#315b40);color:var(--ui-on-primary,#fff);border-color:var(--ui-primary,#315b40)}
 .coach-explanation-controls button{font:inherit;min-height:28px;padding:3px 7px;border:1px solid currentColor;border-radius:5px;background:transparent;color:inherit;cursor:pointer;white-space:nowrap}
 .coach-explanation-controls button:disabled{opacity:.35;cursor:default}
 .move-coach:has(.coach-explain[aria-expanded="true"]) #coach-text{font-size:15px;line-height:1.5}
