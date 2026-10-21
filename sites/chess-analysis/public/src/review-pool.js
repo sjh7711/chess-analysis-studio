@@ -13,10 +13,28 @@ function validConcurrency(concurrency) {
 // One slot owns one engine and one complete search sequence at a time. Higher
 // priority work gets the next available slot; running depth searches finish.
 export class ReviewWorkerPool {
-  constructor({ concurrency = 6, createWorker, signal } = {}) {
+  constructor({ concurrency = 6, createWorker, signal, interactiveBackgroundLimit = null,
+    interactiveCooldownMs = 0, timers = globalThis } = {}) {
     this.concurrency = validConcurrency(concurrency);
     if (typeof createWorker !== 'function') throw new TypeError('A review worker factory is required.');
+    if (interactiveBackgroundLimit !== null && (!Number.isInteger(interactiveBackgroundLimit)
+      || interactiveBackgroundLimit < 0 || interactiveBackgroundLimit > MAX_REVIEW_WORKERS)) {
+      throw new RangeError(`Interactive background limit must be between 0 and ${MAX_REVIEW_WORKERS}.`);
+    }
+    if (!Number.isFinite(interactiveCooldownMs) || interactiveCooldownMs < 0) {
+      throw new RangeError('Interactive cooldown must be a finite non-negative duration.');
+    }
+    if (typeof timers?.setTimeout !== 'function' || typeof timers?.clearTimeout !== 'function') {
+      throw new TypeError('Review timers must provide setTimeout and clearTimeout functions.');
+    }
     this.createWorker = createWorker;
+    this.interactiveBackgroundLimit = interactiveBackgroundLimit;
+    this.interactiveCooldownMs = interactiveCooldownMs;
+    this.setTimer = timers.setTimeout.bind(timers);
+    this.clearTimer = timers.clearTimeout.bind(timers);
+    this.interactiveCooldown = null;
+    this.foreground = 0;
+    this.backgroundRunning = 0;
     this.controller = new AbortController();
     this.workers = new Set();
     this.slots = [];
@@ -39,6 +57,31 @@ export class ReviewWorkerPool {
   get pending() { return this.queue.length; }
   get metrics() {
     return { running: this.running, pending: this.pending, peak: this.peak, concurrency: this.concurrency };
+  }
+  get interactiveMetrics() {
+    const coolingDown = this.interactiveCooldown !== null;
+    const throttled = this.interactiveBackgroundLimit !== null && (this.foreground > 0 || coolingDown);
+    return { foreground: this.foreground, backgroundRunning: this.backgroundRunning,
+      backgroundLimit: throttled ? Math.min(this.interactiveBackgroundLimit, this.concurrency - 1) : this.concurrency,
+      throttled, coolingDown };
+  }
+
+  clearInteractiveCooldown() {
+    if (!this.interactiveCooldown) return;
+    this.clearTimer(this.interactiveCooldown.handle);
+    this.interactiveCooldown = null;
+  }
+
+  startInteractiveCooldown() {
+    if (this.closed || this.interactiveBackgroundLimit === null || this.interactiveCooldownMs === 0) return;
+    this.clearInteractiveCooldown();
+    const cooldown = { handle: null };
+    this.interactiveCooldown = cooldown;
+    cooldown.handle = this.setTimer(() => {
+      if (this.interactiveCooldown !== cooldown) return;
+      this.interactiveCooldown = null;
+      this.schedulePump();
+    }, this.interactiveCooldownMs);
   }
 
   release(state, cancel = false) {
@@ -73,6 +116,7 @@ export class ReviewWorkerPool {
     if (this.closed) return;
     this.closed = true;
     this.failure = error;
+    this.clearInteractiveCooldown();
     this.signal?.removeEventListener('abort', this.onAbort);
     this.controller.abort(error);
     for (const task of [...this.tasks]) this.cancelTask(task, error, cancel);
@@ -99,8 +143,10 @@ export class ReviewWorkerPool {
     task.signal?.removeEventListener('abort', task.onAbort);
     task.group?.delete(task);
     this.tasks.delete(task);
+    if (task.priority > 0 && --this.foreground === 0) this.startInteractiveCooldown();
     if (failed) task.reject(error);
     else task.resolve(result);
+    this.schedulePump();
   }
 
   submit(spec = {}) {
@@ -124,6 +170,10 @@ export class ReviewWorkerPool {
     if (group) group.add(task);
     else signal?.addEventListener('abort', task.onAbort, { once: true });
     this.tasks.add(task);
+    if (priority > 0) {
+      this.foreground++;
+      this.clearInteractiveCooldown();
+    }
     this.queue.push(task);
     this.queue.sort((a, b) => b.priority - a.priority || a.order - b.order);
     this.schedulePump();
@@ -142,11 +192,16 @@ export class ReviewWorkerPool {
       let slot = this.slots[index];
       if (!slot) this.slots[index] = slot = { index, state: null, retiring: null, busy: false, task: null };
       if (slot.busy) continue;
+      // Existing searches retain their full depth budget. Once those finish,
+      // keep most CPUs idle for interactive work rather than refilling every
+      // slot with original-game positions. Positive priorities remain FIFO.
+      if (this.queue[0].priority <= 0 && this.backgroundRunning >= this.interactiveMetrics.backgroundLimit) break;
       const task = this.queue.shift();
       task.status = 'running';
       slot.busy = true;
       slot.task = task;
       this.running++;
+      if (task.priority <= 0) this.backgroundRunning++;
       this.peak = Math.max(this.peak, this.running);
       // execute handles every rejection and settles the public task promise.
       slot.execution = this.execute(slot, task);
@@ -200,6 +255,7 @@ export class ReviewWorkerPool {
       slot.busy = false;
       slot.task = null;
       this.running--;
+      if (task.priority <= 0) this.backgroundRunning--;
       this.finishTask(task, result, error, failed);
       this.schedulePump();
     }

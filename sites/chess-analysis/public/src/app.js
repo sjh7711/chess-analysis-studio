@@ -146,6 +146,7 @@ function isCached(result) {
 }
 function sharedEnginePool() {
   if(!analysisPool)analysisPool=new ReviewWorkerPool({concurrency:performanceOptions.threads,
+    interactiveBackgroundLimit:1,interactiveCooldownMs:350,
     createWorker:()=>new StockfishEngine(Worker,{engineId:REVIEW_ENGINE_ID,hash:performanceOptions.hash,threads:1})});
   analysisPool.setConcurrency(performanceOptions.threads);
   return analysisPool;
@@ -467,9 +468,11 @@ function renderAnalysis() {
   const evaluated=state.game.positions.filter((_,index)=>isCached(state.results.get(index))).length;
   const totalTasks=state.game.positions.length+state.game.moves.length;
   const doneTasks=evaluated+Math.max(0,complete-Number(isCached(state.results.get(0))));
+  const responsive=analysisPool?.interactiveMetrics.throttled;
+  const workload=responsive?' · 탐색 응답 우선 · 원본 작업 조절 중':state.line?' · 탐색 중에도 원본 분석 계속':'';
   $('progress-text').textContent = evaluated<state.game.positions.length
-    ? `국면 분석 · ${evaluated} / ${state.game.positions.length} · 최대 ${performanceOptions.threads}개 작업${state.line?' · 자유 탐색 우선':''}`
-    : `수 검토 · ${Math.max(0,complete-1)} / ${state.game.moves.length}`;
+    ? `국면 분석 · ${evaluated} / ${state.game.positions.length} · 최대 ${performanceOptions.threads}개 작업${workload}`
+    : `수 검토 · ${Math.max(0,complete-1)} / ${state.game.moves.length}${workload}`;
   const percent = Math.round(doneTasks/totalTasks*100);
   $('progress-percent').textContent = `${percent}%`;
   $('progress-bar').max = totalTasks;
@@ -1059,7 +1062,7 @@ $('engine-settings-open').onclick = () => {
   $('settings-threads').innerHTML=`<option value="auto">${AUTO_THREAD_LABEL} · ${automatic}개 작업</option>${availableReviewWorkers(logicalCores).map(count=>`<option value="${count}">수동 · ${count}개 작업</option>`).join('')}`;
   $('settings-threads').value = performanceOptions.threadMode==='auto'?'auto':String(performanceOptions.threads);
   $('threads-note').textContent = maxThreads > 1
-    ? `논리 스레드 ${logicalCores}개 기준 자동 ${automatic}개 작업 · 최대 ${maxThreads}개(50% 이하). 원본 기보·자유 탐색·전구가 이 한도를 함께 사용합니다. 다음으로 비는 작업은 자유 탐색·전구에 우선 배정합니다. 실제 CPU 점유율을 제한하는 기능은 아닙니다.`
+    ? `논리 스레드 ${logicalCores}개 기준 자동 ${automatic}개 작업 · 최대 ${maxThreads}개(50% 이하). 원본 기보·자유 탐색·전구가 이 한도를 함께 사용합니다. 자유 탐색·전구 계산 중에는 원본의 새 작업을 최대 1개로 줄이고, 탐색이 끝나면 전체 한도로 돌아갑니다. 이미 계산 중인 국면은 설정 깊이까지 완료합니다. 실제 CPU 점유율을 제한하는 기능은 아닙니다.`
     : logicalCores===1?'단일 스레드 기기는 분석에 필요한 최소 1개 작업을 사용합니다.':'이 기기에서는 논리 스레드의 50% 이하인 1개 작업으로 분석합니다.';
   $('engine-settings-dialog').showModal();
 };
