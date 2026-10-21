@@ -26,8 +26,10 @@ function fixture({black=false,history=[],quiet=false,fen}={}) {
 const attach=x=>{x.after.moveReview.mateReview=x.record;return x;};
 function assertOriginalUnchanged(x,fn){const state=()=>JSON.stringify({before:x.before,after:x.after,move:x.move,context:x.context,rootFen:x.root.fen(),history:x.root.history()});const snapshot=state();const result=fn();assert.equal(state(),snapshot);return result;}
 
-test('a fully certified quiet mate in two can be missed only with independent longer-mate conflict proof',()=>{
-  for(const black of [false,true]){const x=fixture({black,quiet:true});assert.equal(classifyMove(x.before,x.after,x.move,x.context).mateEvidence,undefined);attach(x);assert.ok(validatedMateReview(x.before,x.after,x.move,x.context));
+test('a certified quiet mate in two requires independent conflict proof or a history-verified KRK win',()=>{
+  for(const black of [false,true]){const x=fixture({black,quiet:true});assert.equal(classifyMove(x.before,x.after,x.move).mateEvidence,undefined);
+    const elementary=classifyMove(x.before,x.after,x.move,x.context);assert.equal(elementary.key,'miss');assert.equal(elementary.endgameEvidence.kind,'preserved-king-rook-vs-king');
+    assert.equal(elementary.mateEvidence.checkingStart,false);attach(x);assert.ok(validatedMateReview(x.before,x.after,x.move,x.context));
     const g=assertOriginalUnchanged(x,()=>classifyMove(x.before,x.after,x.move,x.context));assert.equal(g.key,'miss');assert.equal(g.mateEvidence.checkingStart,false);assert.equal(g.reason.includes('체크로 시작'),false);}
 });
 

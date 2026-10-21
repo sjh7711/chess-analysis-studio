@@ -75,16 +75,16 @@ test('loss explanations identify verified tactical causes rather than just namin
     {fen:'k7/8/3p4/4P3/8/5N2/8/4K3 w - - 0 10',move:'Nh4',pv:['d6e5'],cause:/폰을 지키던 나이트가 자리를 떠나.*e5의 백 폰을 잡/},
     {fen:'k7/8/2b5/3N4/4P3/8/8/4K3 w - - 0 10',move:'Nb4',pv:['c6e4'],cause:/비숍의 공격길이 열려.*e4의 백 폰을 잡/},
     {fen:'k7/8/8/5n2/8/8/2R1K3/7R w - - 0 10',move:'Rg1',pv:['f5d4','e2f2','d4c2'],cause:/나이트의 동시 공격.*c2의 백 룩을 잡/},
-    {fen:'k1r5/8/8/8/8/8/6Q1/4K3 w - - 0 10',move:'Qg1',pv:['c8c1','e1f2','c1g1','f2g1'],cause:/체크에 대응하는 사이.*g1의 백 퀸을 잡/},
+    {fen:'k1r5/8/8/8/8/8/6Q1/4K3 w - - 0 10',move:'Qg1',pv:['c8c1','e1f2','c1g1','f2g1'],setup:true,cause:/c1에서 체크하면서 e1의 왕 뒤 g1의 퀸.*왕이 피한 뒤.*g1의 백 퀸을 잡/},
     {fen:'k3r3/8/5b2/8/8/2P5/4N3/4K2R w - - 0 10',move:'Rg1',pv:['f6c3','e1f1'],existing:true,cause:/이미 c3의 폰이 공격받고 있었지만 나이트가 왕을 보호하느라 되잡을 수 없어.*c3의 백 폰을 잡/},
     {fen:'k7/8/8/8/3p4/8/4P3/7K w - - 0 10',move:'e4',pv:['d4e3'],cause:/앙파상을 허용해.*e4의 백 폰을 잡/},
   ];
-  for (const {fen,move:san,pv,cause,existing} of cases) {
+  for (const {fen,move:san,pv,cause,existing,setup} of cases) {
     const chess=new Chess(fen),move=chess.move(san);
     for (const uci of pv) assert.ok(chess.move(uci),'fixture continuation must be legal');
     const description=describeMove(move,cp(0),cp(-300,pv));
     assert.equal(description.grade.key,'blunder');
-    assert.match(description.text,existing?/^이미/:/^이 수로 인해/);
+    assert.match(description.text,existing?/^이미/:setup?/^이 예상 수순에서는/:/^이 수로 인해/);
     assert.match(description.text,cause,san);
     assert.doesNotMatch(description.text,/예상 응수가 이어지면|undefined|NaN/);
   }

@@ -10,6 +10,8 @@ export const moveLabel = move => `${moveTurn(move)} · ${PIECE_NAMES[move.piece]
 const mateWinner = score => score?.type === 'mate' ? (scoreValue(score) > 0 ? 'w' : 'b') : null;
 const assessedInsightResult=(before,after,move,context={})=>assessedMoveResult(before,after,move,
   context.game && Number.isInteger(context.index)?{moves:context.game.moves,moveIndex:context.index-1}:context);
+const insightGradeContext=(context={})=>context.game && Number.isInteger(context.index)
+  ?{...context,moves:context.game.moves,moveIndex:context.index-1}:context;
 
 // Explanation searches are separate from game grading. Bind their cache to
 // the original position, history and completed review, never a refined insight.
@@ -68,8 +70,7 @@ export function refineInsight(context,kind,result) {
   }
   if(kind==='alternative') {
     const details=insight.kind==='mistake'?mistakeDetails(move,before,assessedInsightResult(before,after,move,context),insight.grade,insight.response,source):null;
-    const alternativeFact=source.pv[0]===uciMove(move)?'이 깊이에서는 실전 수와 같은 수가 추천됩니다.'
-      : details?.alternativeFact||coachAlternative(source)?.text||recommendedMove(source);
+    const alternativeFact=alternativeExplanation(move,source,details?.alternativeFact);
     return {...insight,alternative:source,alternativeFact,summary:details?details.summary:insight.summary};
   }
   const consequence=source.consequence;
@@ -77,8 +78,8 @@ export function refineInsight(context,kind,result) {
   const mate=verifiedMate(source),mateFact=verifiedMateFact(source,move.color),opponentMate=mate&&mate.winner!==move.color;
   const openedRisk=insight.kind==='move'&&!insight.sacrificeFact?nearMaterialRisk(move,source):'';
   const responseFact=details?.responseFact||(opponentMate?mateFact:source.offer&&source.focus.payoff?sacrificeExplanation(move,source):mateFact||openedRisk||firstMoveFact(source));
-  const purposeFact=insight.kind==='mistake'?insight.purposeFact:basicMoveComment(move,{...context,continuation:source});
-  const summary=details?.summary||goodMoveSummary(move,purposeFact,source,insight.sacrificeFact,openedRisk);
+  const purposeFact=insight.kind==='mistake'?insight.purposeFact:endingMovePurpose(move,insight.grade)||basicMoveComment(move,{...context,continuation:source});
+  const summary=details?.summary||goodMoveSummary(move,purposeFact,source,insight.sacrificeFact,openedRisk,insight.grade);
   return {...insight,response:source,responseFact,summary,purposeFact,riskFact:details?.riskFact||(opponentMate?mateFact:openedRisk||(source.score.type!=='mate' && consequence?.distant?distantRisk(consequence):'')),
     materialFact:source.score.type!=='mate'?nearMaterialNote(source):''};
 }
@@ -572,7 +573,7 @@ function distantRisk(consequence) {
 }
 
 export function explainMistake(move, before, after, context = {}) {
-  const grade = move && classifyMove(before,after,move,context);
+  const grade = move && classifyMove(before,after,move,insightGradeContext(context));
   if (!grade || grade.severity < 1) return null;
   after=assessedInsightResult(before,after,move,context);
   const player = side(move.color), opponent = side(move.color === 'w' ? 'b' : 'w');
@@ -614,14 +615,14 @@ export function explainMistake(move, before, after, context = {}) {
 // The lightbulb explains every completed move. The main defensive PV and an
 // acceptance example are separate lines with separate scores and identities.
 export function explainMove(move,before,after,context={}) {
-  const grade=move && classifyMove(before,after,move,context);
+  const grade=move && classifyMove(before,after,move,insightGradeContext(context));
   if (!grade) return null;
   if (grade.severity>=1) return {...explainMistake(move,before,after,context),kind:'mistake',moveFact:moveText(move),sacrifice:null,sacrificeFact:''};
   const assessed=assessedInsightResult(before,after,move,context);
   const response=focusContinuation(move,continuation(insightPosition(move,true,context),assessed),false,NEAR_CONSEQUENCE_PLIES,context);
   const alternative=focusContinuation(move,continuation(insightPosition(move,false,context),before),true,NEAR_CONSEQUENCE_PLIES,context);
   const sacrifice=sacrificeContinuation(move,before,after,context);
-  const purpose=basicMoveComment(move,{...context,continuation:response});
+  const purpose=endingMovePurpose(move,grade)||basicMoveComment(move,{...context,continuation:response});
   const reason=grade.reason || (grade.key==='best' ? '분석한 후보 중 가장 높은 평가를 지키는 수입니다.'
     : grade.key==='excellent' ? '엔진이 예상한 승점을 거의 지키는 선택입니다.'
     : '최선수와 비교해 예상 승점의 감소를 작게 유지한 선택입니다.');
@@ -629,22 +630,53 @@ export function explainMove(move,before,after,context={}) {
   const primaryFact=response.offer && response.focus.payoff ? sacrificeExplanation(move,response) : '';
   const mate=verifiedMate(response),mateFact=verifiedMateFact(response,move.color),opponentMate=mate&&mate.winner!==move.color;
   const openedRisk=!sacrificeFact&&!primaryFact?nearMaterialRisk(move,response):'';
-  const summary=goodMoveSummary(move,purpose,response,sacrificeFact,openedRisk);
+  const summary=goodMoveSummary(move,purpose,response,sacrificeFact,openedRisk,grade);
   const alternativeCoach=coachAlternative(alternative);
   return {kind:'move',grade,moveFact:moveText(move),purposeFact:purpose,reason,summary,
     response,responseFact:opponentMate?mateFact:primaryFact||mateFact||openedRisk||firstMoveFact(response),alternative,
-    alternativeFact:alternative.focus.purposePayoff || ['exchange','discovered-defense','block','unpin'].includes(alternativeCoach?.kind)
-      ?alternativeCoach.text:recommendedMove(alternative),
+    alternativeFact:alternativeExplanation(move,alternative,alternativeCoach?.text),
     sacrifice,sacrificeFact,riskFact:opponentMate?mateFact:openedRisk,materialFact:openedRisk||response.focus.recoveredExchange?nearMaterialNote(response):'',lossText:'이 수의 의미',
     evaluation:`수 전 ${formatScore(before.score)} → 수 후 ${formatScore(assessed.score)} (백 기준)`,basis:GRADING_BASIS};
 }
 
-function goodMoveSummary(move,purpose,response,sacrificeFact='',openedRisk='') {
+function endingOutcome(move,grade) {
+  const evidence=grade?.endgameEvidence;
+  if(evidence?.kind!=='preserved-king-rook-vs-king' || evidence.drawClaimsChecked!==true
+    || !['w','b'].includes(evidence.winner) || evidence.maxHalfmove!==66)return '';
+  const men=pieces(new Chess(move.after));
+  if(men.length!==3 || men.filter(piece=>piece.type==='k').length!==2
+    || men.filter(piece=>piece.type==='r' && piece.color===evidence.winner).length!==1)return '';
+  return `룩을 가진 ${side(evidence.winner)}의 이론적 승리 국면은 유지됩니다.`;
+}
+
+function endingMovePurpose(move,grade) {
+  if(!endingOutcome(move,grade) || grade.endgameEvidence.winner!==move.color || /[+#]$/.test(move.san))return '';
+  const after=new Chess(move.after),men=pieces(after);
+  const enemyKing=men.find(piece=>piece.type==='k' && piece.color!==move.color);
+  const ownKing=men.find(piece=>piece.type==='k' && piece.color===move.color);
+  if(move.piece==='k') {
+    const distance=from=>Math.max(Math.abs(from.charCodeAt(0)-enemyKing.square.charCodeAt(0)),Math.abs(Number(from[1])-Number(enemyKing.square[1])));
+    if(distance(move.to)<distance(move.from))return `왕을 ${move.to}로 가져가 상대 왕에게 접근합니다.`;
+  }
+  if(move.piece==='r') {
+    // A bare enemy king cannot pass through a controlled rank/file on this
+    // board. State the visible barrier, not a forced route or mating distance.
+    if(move.to[1]!==move.from[1] && !['1','8'].includes(move.to[1]) && ownKing.square[1]!==move.to[1]
+      && enemyKing.square[1]!==move.to[1])return `룩으로 ${move.to[1]}번째 가로줄을 제어해 상대 왕이 이동할 공간을 제한합니다.`;
+    if(move.to[0]!==move.from[0] && !['a','h'].includes(move.to[0]) && ownKing.square[0]!==move.to[0]
+      && enemyKing.square[0]!==move.to[0])return `룩으로 ${move.to[0]}파일을 제어해 상대 왕이 이동할 공간을 제한합니다.`;
+  }
+  return '';
+}
+
+function goodMoveSummary(move,purpose,response,sacrificeFact='',openedRisk='',grade=null) {
   const verified=verifiedMate(response);
-  if(verified && verified.winner!==move.color)return verifiedMateFact(response,move.color);
+  const ending=endingOutcome(move,grade);
+  if(verified && verified.winner!==move.color)return [verifiedMateFact(response,move.color),ending].filter(Boolean).join(' ');
   if(sacrificeFact)return sacrificeFact;
   if(response.offer && response.focus.payoff)return sacrificeExplanation(move,response);
-  if(verified)return verifiedMateFact(response,move.color);
+  if(verified)return [verifiedMateFact(response,move.color),ending].filter(Boolean).join(' ');
+  if(ending)return [purpose,ending].filter(Boolean).join(' ');
   const mate=response.moves.slice(0,NEAR_CONSEQUENCE_PLIES).find(step=>step.color===move.color && new Chess(step.after).isCheckmate());
   return mate?`이 예상 수순에서는 ${mateFact(mate)}`:openedRisk?`${purpose} ${openedRisk}`:purpose;
 }
@@ -728,11 +760,14 @@ function canSupport(chess,from,target,color) {
   return legalCaptures(probe,color).some(move=>move.from===from && move.to===target);
 }
 
-function pawnPurpose(move,before,after) {
+function pawnPurposePlan(move,before,after) {
   if(move.piece!=='p' || move.captured)return '';
   const attacked=attackedBy(after,move.to,move.color).filter(piece=>!['p','k'].includes(piece.type)
     && !before.attackers(piece.square,move.color).includes(move.from)).sort((a,b)=>VALUES[b.type]-VALUES[a.type]);
-  if(attacked.length)return `${targetName(attacked[0])}${attacked[0].type==='n'?'를':'을'} 공격합니다.`;
+  if(attacked.length) {
+    const action=`${targetName(attacked[0])}${attacked[0].type==='n'?'를':'을'} 공격`;
+    return {kind:'attack',text:action+'합니다.',benefit:action+'할',targets:[attacked[0]]};
+  }
   const home=move.color==='w'?'1':'8', bishops=pieces(after).filter(piece=>piece.color===move.color && piece.type==='b' && piece.square[1]===home);
   const supported=pieces(after).filter(piece=>piece.color===move.color && piece.type==='p' && piece.square!==move.to
     && after.attackers(piece.square,move.color).includes(move.to) && canSupport(after,move.to,piece.square,move.color));
@@ -745,7 +780,96 @@ function pawnPurpose(move,before,after) {
   let text=opening ? `${support?`${support}하고 `:''}${opening.square}의 비숍이 나올 길을 엽니다.`
     : support ? `${support}합니다.` : '';
   if(blocked && text)text+=` ${blocked.square}의 비숍이 갈 수 있는 대각선은 좁아집니다.`;
-  return text;
+  const benefit=opening?`${support?`${support}하고 `:''}${opening.square}의 비숍이 나올 길을 열`
+    :support?`${support}할`:'';
+  return text?{kind:'pawn-plan',text,benefit,cost:blocked&&opening?`${blocked.square}의 비숍이 갈 수 있는 대각선은 좁아집니다.`:''}:null;
+}
+const pawnPurpose=(move,before,after)=>pawnPurposePlan(move,before,after)?.text||'';
+
+// A connection is useful board information, not a promise that doubling wins.
+// Both rooks must be free to recapture on the other's square: an absolute pin
+// or an intervening piece must not produce a fictitious mutual defence.
+function rookConnection(move,before,after) {
+  if(move.piece!=='r' || move.captured)return null;
+  const partner=pieces(after).find(piece=>piece.color===move.color && piece.type==='r' && piece.square!==move.to
+    && before.get(piece.square)?.type==='r' && before.get(piece.square)?.color===move.color
+    && (piece.square[0]===move.to[0] || piece.square[1]===move.to[1])
+    && canSupport(after,move.to,piece.square,move.color) && canSupport(after,piece.square,move.to,move.color)
+    && !(canSupport(before,move.from,piece.square,move.color) && canSupport(before,piece.square,move.from,move.color)));
+  if(!partner)return null;
+  const line=partner.square[0]===move.to[0]?`${move.to[0]}파일`:`${move.to[1]}번째 가로줄`;
+  return {kind:'rook-connection',text:`${line}에 두 룩을 연결해 서로 지키게 합니다.`,
+    benefit:`${line}에 두 룩을 연결해 서로 지키게 할`,squares:[move.to,partner.square]};
+}
+
+function absolutePin(position,attackerSquare) {
+  const attacker=position.get(attackerSquare);
+  if(!attacker || !['b','r','q'].includes(attacker.type))return [];
+  const [file,rank]=[attackerSquare.charCodeAt(0)-97,Number(attackerSquare[1])-1],pins=[];
+  for(const [df,dr] of [[1,0],[-1,0],[0,1],[0,-1],[1,1],[1,-1],[-1,1],[-1,-1]]) {
+    if(attacker.type==='b' && (!df||!dr) || attacker.type==='r' && df&&dr)continue;
+    let target=null;
+    for(let f=file+df,r=rank+dr;f>=0&&f<8&&r>=0&&r<8;f+=df,r+=dr) {
+      const square=String.fromCharCode(97+f)+(r+1),piece=position.get(square);
+      if(!piece)continue;
+      if(piece.color===attacker.color)break;
+      if(!target) {if(piece.type==='k')break;target={square,type:piece.type};continue;}
+      if(piece.type==='k')pins.push({attackerSquare,attackerType:attacker.type,targetSquare:target.square,targetType:target.type,kingSquare:square});
+      break;
+    }
+  }
+  return pins;
+}
+
+function tracedVictim(line,setupIndex,target,capture) {
+  let square=target.targetSquare;
+  const color=capture.color==='w'?'b':'w',atSetup=new Chess(line.moves[setupIndex].after).get(square);
+  if(atSetup?.color!==color || atSetup.type!==capture.captured || target.targetType!==capture.captured)return false;
+  for(const step of line.moves.slice(setupIndex+1,line.moves.indexOf(capture))) {
+    if(step.captured && capturedSquare(step)===square)return false;
+    if(step.color===color && step.from===square)square=step.to;
+  }
+  return square===capturedSquare(capture);
+}
+
+function tracedAttacker(line,setupIndex,square,type,capture) {
+  const attacker=new Chess(line.moves[setupIndex].after).get(square);
+  if(attacker?.color!==capture.color || attacker.type!==type)return false;
+  for(const step of line.moves.slice(setupIndex+1,line.moves.indexOf(capture))) {
+    if(step.captured && capturedSquare(step)===square)return false;
+    if(step.color===capture.color && step.from===square)square=step.to;
+  }
+  return square===capture.from && type===capture.piece;
+}
+
+// Explain the setup in the same legal PV as the capture, in chronological
+// order. A motif elsewhere on the board cannot stand in for this victim, and
+// the existence of a motif is never proof that every defence loses material.
+function tacticalLossSetup(line,capture) {
+  const end=line.moves.indexOf(capture);
+  if(!line.complete || line.invalid || end<1 || end>=NEAR_CONSEQUENCE_PLIES)return '';
+  for(const [index,step] of line.moves.slice(0,end).entries()) {
+    if(step.color!==capture.color)continue;
+    const tactics=tacticalPatterns(step),after=new Chess(step.after);
+    const discovery=tactics?.discovered.find(target=>tracedVictim(line,index,target,capture)
+      && tracedAttacker(line,index,target.attackerSquare,target.attackerType,capture));
+    if(discovery) {
+      const action=`${side(step.color)} ${object(step.piece)} ${step.from}에서 ${step.to}로 옮겨${after.isCheck()?' 체크하면서':''} ${discovery.attackerSquare}의 ${PIECE_NAMES[discovery.attackerType]}${discovery.attackerType==='n'?'가':'이'} ${discovery.targetSquare}의 ${object(discovery.targetType)} 공격할 길을 엽니다.`;
+      return `이 예상 수순에서는 ${action} 이어서 ${concreteMoveText(capture,'possible')}`;
+    }
+    const skewer=tactics?.skewers.find(target=>tracedVictim(line,index,target,capture)
+      && tracedAttacker(line,index,target.attackerSquare,target.attackerType,capture)
+      && line.moves.slice(index+1,end).some(reply=>reply.color!==step.color && reply.piece==='k' && reply.from===target.kingSquare));
+    if(skewer)return `이 예상 수순에서는 ${side(step.color)} ${PIECE_NAMES[skewer.attackerType]}${skewer.attackerType==='n'?'가':'이'} ${skewer.attackerSquare}에서 체크하면서 ${skewer.kingSquare}의 왕 뒤 ${skewer.targetSquare}의 ${PIECE_NAMES[skewer.targetType]}도 겨냥합니다. 왕이 피한 뒤 ${concreteMoveText(capture,'possible')}`;
+    const pin=absolutePin(after,step.to).find(target=>tracedVictim(line,index,target,capture)
+      && legalCaptures(after,step.color).some(attack=>attack.from===step.to && capturedSquare(attack)===target.targetSquare)
+      && (tracedAttacker(line,index,target.attackerSquare,target.attackerType,capture)
+        || line.moves[index+1]?.from===target.targetSquare && line.moves[index+1]?.to===target.attackerSquare
+          && line.moves[index+1]?.captured===target.attackerType)
+      && !absolutePin(new Chess(step.before),step.from).some(previous=>previous.targetSquare===target.targetSquare && previous.kingSquare===target.kingSquare));
+    if(pin)return `이 예상 수순에서는 ${side(step.color)} ${PIECE_NAMES[pin.attackerType]}${pin.attackerType==='n'?'가':'이'} ${pin.attackerSquare}에서 ${pin.targetSquare}의 ${object(pin.targetType)} ${pin.kingSquare}의 왕 앞에 핀으로 묶습니다. 이어지는 교환에서 ${concreteMoveText(capture,'possible')}`;
+  }
+  return '';
 }
 
 function lossCause(move,line,capture) {
@@ -757,6 +881,8 @@ function lossCause(move,line,capture) {
   const timing=line.moves[0]===capture ? '바로 다음 수에' : '이어지는 응수에서';
   const ending=`${timing} ${concreteMoveText(capture,'possible')}`;
   if (capture.flags.includes('e')) return `이 수로 인해 상대에게 앙파상을 허용해, ${ending}`;
+  const setup=tacticalLossSetup(line,capture);
+  if(setup)return setup;
   if (stationary) {
     const guards=current.attackers(square,move.color);
     if(before.get(square)?.color===move.color && !before.attackers(square,move.color).length
@@ -804,7 +930,7 @@ function lossCause(move,line,capture) {
       && !legalGuard(before,square,pinned,move.color)) return `이미 ${square}의 ${victim}${capture.captured==='n'?'가':'이'} 공격받고 있었지만 ${PIECE_NAMES[defender]}${defender==='n'?'가':'이'} 왕을 보호하느라 되잡을 수 없어, ${ending}`;
     return `이 수로 인해 ${object(capture.captured)} 지키는 ${PIECE_NAMES[defender]}${defender==='n'?'가':'이'} 왕을 보호하느라 되잡을 수 없어, ${ending}`;
   }
-  if (!guards.length) return `${square}의 ${victim}${capture.captured==='n'?'가':'이'} 수비 없이 남아, ${ending}`;
+  if (!guards.length) return `${stationary?'':'이 예상 수순에서 '}${square}의 ${victim}${capture.captured==='n'?'가':'이'} 수비 없이 남아, ${ending}`;
   return line.moves[0]===capture?`이 예상 수순에서는 ${ending}`:`이어지는 예상 수순에서는 ${concreteMoveText(capture,'possible')}`;
 }
 
@@ -897,10 +1023,13 @@ function basicMoveComment(move,context={}) {
     }
     return centers.length ? `중앙의 ${centers.join('·')} 칸을 겨냥하며 ${object(move.piece)} 전개합니다.` : `${object(move.piece)} 전개합니다.`;
   }
-  if (freshTarget) return `${targetName(freshTarget)}${freshTarget.type==='n'?'를':'을'} 공격합니다.`;
+  const escaping=legallyAttacked(before,move.from,enemy) && !legallyAttacked(after,move.to,enemy);
+  if (freshTarget) return `${escaping?`공격받던 ${object(move.piece)} ${move.to}로 피하면서 `:''}${targetName(freshTarget)}${freshTarget.type==='n'?'를':'을'} 공격합니다.`;
   const positionalPawn=positionalPawnPurpose(move);
-  if (legallyAttacked(before,move.from,enemy) && !legallyAttacked(after,move.to,enemy)) return `공격받던 ${object(move.piece)} ${move.to}로 피합니다.${positionalPawn.startsWith('통과 폰')?` ${positionalPawn}`:''}`;
+  if (escaping) return `공격받던 ${object(move.piece)} ${move.to}로 피합니다.${positionalPawn.startsWith('통과 폰')?` ${positionalPawn}`:''}`;
   if(positionalPawn)return positionalPawn;
+  const connection=rookConnection(move,before,after);
+  if(connection)return connection.text;
   if (move.piece==='p' && ['d','e'].includes(move.to[0]) && ['4','5'].includes(move.to[1])) return `중앙에 폰을 세워${centers.length?` ${centers.join('·')} 칸을 제어합니다.`:' 공간을 확보합니다.'}`;
   if (move.piece==='r' && !pieces(after).some(p=>p.type==='p' && p.square[0]===move.to[0])) return `폰이 없는 ${move.to[0]}파일에 룩을 배치합니다.`;
   if (centers.length) return `${object(move.piece)} ${move.to}에 두어 중앙의 ${centers.join('·')} 칸을 제어합니다.`;
@@ -925,6 +1054,12 @@ function coachPlan(move,continuation=null) {
     && legallyAttacked(before,piece.square,enemy) && legalGuard(after,piece.square,move.to,move.color)
     && !legalGuard(before,piece.square,move.from,move.color)).sort((a,b)=>VALUES[b.type]-VALUES[a.type]);
   if (move.san.endsWith('#')) return {kind:'mate',move};
+  if(before.isCheck()) {
+    const king=pieces(before).find(piece=>piece.color===move.color && piece.type==='k');
+    const checker=king&&before.attackers(king.square,enemy).includes(capturedSquare(move))&&move.captured;
+    return {kind:'check-evasion',move,benefit:checker?`체크하는 ${targetName({square:capturedSquare(move),type:move.captured})}${move.captured==='n'?'를':'을'} 잡아 체크를 해소할`
+      :move.piece==='k'?'체크를 피할':'왕 앞을 막아 체크를 해소할'};
+  }
   if (move.san.endsWith('+')) return {kind:'check',move};
   const defense=defensivePurpose(move);
   if(defense)return {...defense,move};
@@ -934,12 +1069,22 @@ function coachPlan(move,continuation=null) {
   // that capture is not the opportunity the player necessarily missed.
   if(move.captured)return {kind:'capture',move};
   if (fresh.length>=2 && fresh[1].type!=='p') return {kind:'fork',move,targets:fresh.slice(0,2),benefit:`${fresh.slice(0,2).map(targetName).join('·')}${fresh[1].type==='n'?'를':'을'} 동시에 공격할`};
+  const pawnPlan=pawnPurposePlan(move,before,after);
+  if(pawnPlan)return {...pawnPlan,move};
   if (defended.length) return {kind:'defend',move,targets:[defended[0]],benefit:`공격받던 ${targetName(defended[0])}${defended[0].type==='n'?'를':'을'} 지킬`};
   if (developed) return {kind:'develop',move,centers,targets:fresh,benefit:fresh.length
     ? `${targetName(fresh[0])}${fresh[0].type==='n'?'를':'을'} 공격하며 전개할`
     : centers.length ? `중앙의 ${centers.join('·')} 칸을 제어하며 전개할` : `${object(move.piece)} 전개할`};
-  if (legallyAttacked(before,move.from,enemy) && !legallyAttacked(after,move.to,enemy)) return {kind:'escape',move,benefit:'상대의 공격을 피할'};
+  if (legallyAttacked(before,move.from,enemy) && !legallyAttacked(after,move.to,enemy)) return {kind:'escape',move,targets:fresh,
+    benefit:`상대의 공격을 피${fresh.length?`하면서 ${targetName(fresh[0])}${fresh[0].type==='n'?'를':'을'} 공격할`:'할'}`};
   if (fresh.length) return {kind:'attack',move,targets:[fresh[0]],benefit:`${targetName(fresh[0])}${fresh[0].type==='n'?'를':'을'} 공격할`};
+  const connection=rookConnection(move,before,after);
+  if(connection)return {...connection,move};
+  const positionalPawn=positionalPawnPurpose(move);
+  if(positionalPawn) {
+    const benefit=positionalPawn.replace(/남겨둡니다\.$/,'남겨둘').replace(/만듭니다\.$/,'만들');
+    return {kind:'pawn-plan',move,benefit};
+  }
   if (move.piece==='r' && !pieces(after).some(piece=>piece.type==='p' && piece.square[0]===move.to[0])) return {kind:'file',move,benefit:`폰이 없는 ${move.to[0]}파일을 차지할`};
   if (centers.length) return {kind:'center',move,centers,benefit:`중앙의 ${centers.join('·')} 칸을 제어할`};
   return {kind:'move',move};
@@ -951,11 +1096,24 @@ function coachAlternative(line) {
   const plan=coachPlan(move,{...line,moves:line.moves.slice(1)});
   // Captures, castling, promotions and checks retain every effect in moveText.
   const text=plan.kind==='exchange'?`대신 ${side(move.color)}은 ${plan.trade.text.replace(/제안합니다\.$/,'제안할 수 있었습니다.')}`
+    :plan.kind==='check-evasion'?`대신 ${side(move.color)} ${object(move.piece)} ${move.from}에서 ${move.to}로 옮겨 ${plan.benefit} 수 있었습니다.${move.san.endsWith('+')?' 동시에 상대 왕도 체크합니다.':''}`
     :move.captured || move.promotion || /[+#]$/.test(move.san) || /[kq]/.test(move.flags) || !plan.benefit
     ? recommendedMove(line)
     : `대신 ${side(move.color)} ${object(move.piece)} ${move.from}에서 ${move.to}로 옮겨 ${plan.benefit} 수 있었습니다.`;
   const payoff=alternativePayoffFact(line);
-  return {...plan,text:text+(payoff?` ${payoff}`:'')};
+  return {...plan,text:text+(plan.cost?` ${plan.cost}`:'')+(payoff?` ${payoff}`:'')};
+}
+
+function alternativeExplanation(move,line,existing=null) {
+  if(line.pv[0]===uciMove(move))return '이 깊이에서는 실전 수와 같은 수가 추천됩니다. '
+    +basicMoveComment(move,{continuation:{...line,moves:line.moves.slice(1)}});
+  let text=existing||coachAlternative(line)?.text||recommendedMove(line);
+  const mate=verifiedMate(line);
+  // This is one complete legal example with a matching winner and distance.
+  // It is not proof that every defensive move loses or that the played move
+  // removed a mate. The two branches keep their own scores and board anchors.
+  if(mate?.winner===move.color && line.moves.length>1 && !text.includes('체크메이트'))text+=` ${verifiedMateFact(line,move.color)}`;
+  return text;
 }
 
 function coachOpportunity(move,alternative) {
@@ -999,10 +1157,8 @@ function exceptionalMoveComment(move,context={}) {
 
 function mistakeDetails(move,before,after,grade,reply,alternativeLine) {
   const alternative=coachAlternative(alternativeLine),opponent=reply.moves[0],consequence=reply.consequence;
-  let alternativeFact=alternative?.text||'';
-  const alternativeMate=verifiedMate(alternativeLine);
+  let alternativeFact=alternativeExplanation(move,alternativeLine,alternative?.text);
   const shortMateMiss=missedMateTwo(move,grade,alternativeLine);
-  if(alternativeMate?.winner===move.color && alternativeLine.moves.length>1)alternativeFact+=` ${verifiedMateFact(alternativeLine,move.color)}`;
   if(opponent?.san.endsWith('#') && alternativeLine.moves.length) {
     let stillMated=false;
     try {stillMated=new Chess(alternativeLine.moves[0].after).move(reply.pv[0]).san.endsWith('#');} catch { /* A blocked mating move is no longer legal. */ }
@@ -1039,13 +1195,13 @@ function mistakeDetails(move,before,after,grade,reply,alternativeLine) {
   else reason=responseFact;
   const survivingMate=shortMateMiss && verified?.winner===move.color?`실전 수 뒤에도 ${mateExplanation}`:'';
   return {responseFact,alternativeFact,riskFact:verified&&verified.winner!==move.color?mateExplanation:materialRisk,
-    summary:[reason,alternativeFact,survivingMate].filter(Boolean).join(' ')||'구체적인 응수와 대안을 확인하려면 앞뒤 국면을 다시 분석해 주세요.'};
+    summary:[reason,alternativeFact,survivingMate,endingOutcome(move,grade)].filter(Boolean).join(' ')||'구체적인 응수와 대안을 확인하려면 앞뒤 국면을 다시 분석해 주세요.'};
 }
 
 // Short, board-grounded explanations; no opening-book or proprietary review labels.
 export function describeMove(move,before,after,context = {}) {
   if (!move) return {grade:null,text:'기보에서 수를 선택하면 그 수의 의미를 설명합니다.'};
-  const grade=classifyMove(before,after,move,context);
+  const grade=classifyMove(before,after,move,insightGradeContext(context));
   if (!grade)return {grade,text:basicMoveComment(move,context)};
   if(grade.severity<1)return {grade,text:explainMove(move,before,after,context)?.summary||exceptionalMoveComment(move,context)};
   after=assessedInsightResult(before,after,move,context);

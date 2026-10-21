@@ -1,5 +1,7 @@
 import { Chess, DEFAULT_POSITION, validateFen } from '../vendor/chess.js';
 import { isBookMove } from './opening-book.js';
+import { elementaryEndgameEvidence } from './endgame-evidence.js';
+import { certifiedTacticalLoss } from './capture-proof.js';
 
 export { Chess, DEFAULT_POSITION };
 
@@ -620,7 +622,7 @@ function nearbyExchangeLoss(move,line,majorOnly=false) {
     .sort((a,b)=>b.loss-a.loss || a.end-b.end)[0]||{start:0,end:0,loss:0,majorLost:false};
 }
 
-function saturatedTacticalLoss(before,after,move,signature) {
+function saturatedTacticalLoss(before,after,move,signature,moves,moveIndex) {
   const review=after.moveReview;
   if(before.score.type!=='cp' || review?.score?.type!=='cp')return null;
   const points=expectedPoints(before.score,move.color),next=expectedPoints(review.score,move.color);
@@ -641,11 +643,31 @@ function saturatedTacticalLoss(before,after,move,signature) {
     && ['r','q'].includes(evidence.played.moves[1]?.captured);
   const capturedThenLost=played.start===1 && move.captured
     && !evidence.played.moves.some(step=>step.color===move.color && step.promotion);
-  if(best.start===0 && !(immediateMajor && (played.start===2 || capturedThenLost)))return null;
+  const immediateException=immediateMajor && (played.start===2 || capturedThenLost);
   // Four points is a rook given for a pawn. Smaller differences can reflect
   // deliberate exchanges and promotion timing; do not promote them to errors.
-  return played.majorLost && additional>=4 ? {version:1,additional,played:{start:played.start,end:played.end,loss:played.loss},
-    best:{start:best.start,end:best.end,loss:bestLoss},nearPlies:6,maxPlies:12}:null;
+  if((best.start!==0 || immediateException) && played.majorLost && additional>=4)
+    return {version:1,additional,played:{start:played.start,end:played.end,loss:played.loss},
+      best:{start:best.start,end:best.end,loss:bestLoss},nearPlies:6,maxPlies:12};
+  // A material concession in an already winning position can be a sound
+  // simplification. The new minor-piece certificate only repairs saturation
+  // on the losing side; the existing major-piece rule above is unchanged.
+  if(points>.15)return null;
+  const ordinaryPlayed=nearbyExchangeLoss(move,evidence.played);
+  if(ordinaryPlayed.loss-bestLoss<3 || !Array.isArray(moves) || !Number.isInteger(moveIndex)
+    || moveIndex<0 || moveIndex>=moves.length || moveIndex>512)return null;
+  try {
+    if(moves[moveIndex]?.before!==move.before || moves[moveIndex]?.after!==move.after
+      || uciMove(moves[moveIndex])!==uciMove(move))return null;
+    const root=validatePosition(moves[0]?.before||move.before);
+    for(const step of moves.slice(0,moveIndex)) {
+      if(root.isGameOver() || root.fen()!==step.before || root.move(uciMove(step)).after!==step.after)return null;
+    }
+    if(root.fen()!==move.before)return null;
+    return certifiedTacticalLoss({root,move,bestUci:before.bestmove,
+      playedPv:evidence.played.moves.map(uciMove),bestPv:evidence.best.moves.map(uciMove),
+      playedSnapshot:ordinaryPlayed,bestSnapshot:best,minimum:3});
+  } catch {return null;}
 }
 
 function directRecapture(move, previousMove) {
@@ -858,7 +880,9 @@ function shortMateEvidence(before,after,move,moves,moveIndex,signature) {
     && review.pv?.length===2*allowedDistance;
   const confirmedLonger=before.score.type==='mate' && Math.abs(before.score.value)===2 && review?.score?.type==='cp'
     ?validatedMateReview(before,after,move,{moves,moveIndex}):null;
-  const extendedMate=confirmedLonger && Math.abs(confirmedLonger.score.value)>=3;
+  const elementaryMate=before.score.type==='mate' && before.score.winner===move.color
+    && elementaryEndgameEvidence(move,{moves,moveIndex});
+  const extendedMate=confirmedLonger && Math.abs(confirmedLonger.score.value)>=3 || elementaryMate;
   const missesMate=before.score.type==='mate' && before.score.winner===winner
     && before.score.value===(winner==='w'?2:-2) && review?.score?.type==='cp'
     && (after.score.type==='cp' && Number.isFinite(after.score.value) || extendedMate)
@@ -941,19 +965,29 @@ export function classifyMove(before, after, move, {previous,previousMove,previou
     candidate=verifiedTopCandidate(before,move,after,signature);
   const shortMate=shortMateEvidence(before,after,move,moves,moveIndex,signature);
   const mateProof=validatedMateReview(before,after,move,{moves,moveIndex});
+  const endgameEvidence=elementaryEndgameEvidence(move,{moves,moveIndex});
+  // A capture certificate can depend on a draw claim in the actual history.
+  // Bind its positive and negative cache entries to that history as well as
+  // to the engine score/PV signature, including in-place exploration edits.
+  const captureHistory=before.score.type==='cp' && after.moveReview?.score?.type==='cp'
+    && expectedPoints(before.score,move.color)<=.15 && Math.abs(before.score.value-after.moveReview.score.value)>=50
+    && Array.isArray(moves) && Number.isInteger(moveIndex) && moveIndex>=0 && moveIndex<=512
+    ?JSON.stringify(moves.slice(0,moveIndex+1).map(step=>step?[step.before,step.after,step.from,step.to,step.promotion]:null)):null;
   const cached = gradeCache.get(move);
   if (cached?.before===before && cached.after===after && cached.previous===previous
     && cached.previousMove===previousMove && cached.previousGrade===previousGrade && cached.recapture===recapture
     && cached.mateMiss===mateMiss && cached.candidate===candidate && cached.shortMate===shortMate
-    && cached.mateProof===mateProof && cached.signature===signature) return cached.grade;
+    && cached.mateProof===mateProof && cached.endgameEvidence===endgameEvidence && cached.captureHistory===captureHistory
+    && cached.signature===signature) return cached.grade;
   const assessed=assessedMoveResult(before,after,move,{moves,moveIndex});
   const sign = move.color === 'w' ? 1 : -1;
   let loss;
   if (before.score.type === 'mate' && assessed.score.type === 'mate' && Math.sign(scoreValue(before.score)) === Math.sign(scoreValue(assessed.score))) loss = 0;
   else loss = Math.max(0, (scoreValue(before.score) - scoreValue(assessed.score)) * sign);
   const best = candidate && !mateMiss;
-  if (best) loss=0;
-  const beforePoints=expectedPoints(before.score,move.color), afterPoints=expectedPoints(assessed.score,move.color);
+  if (best || endgameEvidence) loss=0;
+  const beforePoints=endgameEvidence ? Number(endgameEvidence.winner===move.color):expectedPoints(before.score,move.color),
+    afterPoints=endgameEvidence ? Number(endgameEvidence.winner===move.color):expectedPoints(assessed.score,move.color);
   const pointsLoss=best ? 0 : Math.max(0,beforePoints-afterPoints);
   let key=best ? 'best' : pointsLoss<0.02 ? 'excellent' : pointsLoss<0.05 ? 'good' : pointsLoss<0.10 ? 'inaccuracy' : pointsLoss<0.20 ? 'mistake' : 'blunder';
   let severity=pointsLoss>=0.20 ? 3 : pointsLoss>=0.10 ? 2 : pointsLoss>=0.05 ? 1 : 0;
@@ -970,7 +1004,7 @@ export function classifyMove(before, after, move, {previous,previousMove,previou
     && (sacrificeEvidence(move) || !recapture && newSacrificeDecision(move,reviewedSacrificeEvidence(before,after,move),previousMove))
     && !alreadyWinningWithoutSacrifice(before,move)) {
     key='brilliant'; reason='기물을 내줄 수 있는 수지만, 최선의 응수에도 유리하거나 대등한 국면을 유지합니다.';
-  } else if (best && second && beforePoints-afterPoints<0.02 && beforePoints-expectedPoints(second.score,move.color)>=0.10
+  } else if (!endgameEvidence && best && second && beforePoints-afterPoints<0.02 && beforePoints-expectedPoints(second.score,move.color)>=0.10
     && !recapture && !onlyLegalMove(move) && !childSearchContradictsGreat(before,after,move)
     && !confirmedTopCandidate(before,after,move,signature)) {
     key='great'; reason='다른 후보보다 예상 승점을 크게 지키는 결정적인 수입니다.';
@@ -987,13 +1021,13 @@ export function classifyMove(before, after, move, {previous,previousMove,previou
       :mateEvidence.checkingStart===false?'상대의 모든 합법 응수에 다음 수로 메이트할 수 있었지만, 그 마무리를 놓쳤습니다.'
         :'체크로 시작해 상대의 모든 합법 응수에 다음 수로 메이트할 수 있었지만, 그 마무리를 놓쳤습니다.';
   }
-  const tacticalLoss=['excellent','good','inaccuracy'].includes(key)?saturatedTacticalLoss(before,after,move,signature):null;
+  const tacticalLoss=['excellent','good','inaccuracy'].includes(key)?saturatedTacticalLoss(before,after,move,signature,moves,moveIndex):null;
   if(tacticalLoss) {
     key='mistake';severity=Math.max(2,severity);
     reason=`가까운 예상 교환에서 최선의 수보다 기물 점수를 ${tacticalLoss.additional}점 더 내줄 수 있습니다.`;
   }
-  const grade={key,...MOVE_GRADES[key],loss,pointsLoss,severity,reason,...(mateEvidence?{mateEvidence}:{}),...(tacticalLoss?{tacticalLoss}:{})};
-  gradeCache.set(move,{before,after,previous,previousMove,previousGrade,recapture,mateMiss,candidate,shortMate,mateProof,signature,grade});
+  const grade={key,...MOVE_GRADES[key],loss,pointsLoss,severity,reason,...(endgameEvidence?{endgameEvidence}:{}),...(mateEvidence?{mateEvidence}:{}),...(tacticalLoss?{tacticalLoss}:{})};
+  gradeCache.set(move,{before,after,previous,previousMove,previousGrade,recapture,mateMiss,candidate,shortMate,mateProof,endgameEvidence,captureHistory,signature,grade});
   return grade;
 }
 

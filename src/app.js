@@ -78,17 +78,23 @@ function currentResult() { return state.line ? state.line.results.get(state.line
 function gradingHistory(moves) {
   return state.line?.steps===moves ? state.line.gradingContext(0) : {moves,moveIndex:0};
 }
-function gradesThrough(results,moves,index) {
+function gradesThrough(results,moves,index,gradeList=null) {
   const history=gradingHistory(moves);
   let grade=null;
   for (let i=1;i<=index;i++) {
     const before=results.get(i-1),after=results.get(i),move=moves[i-1];
     const moveIndex=history.moveIndex+i-1;
     grade=hasMoveReview(before,after,move) ? classifyMove(before,after,move,{previous:results.get(i-2),previousMove:history.moves[moveIndex-1],previousGrade:grade,moves:history.moves,moveIndex}) : null;
+    if(gradeList)gradeList.push(grade);
   }
   return grade;
 }
 function gradeAt(index) { return gradesThrough(state.results,state.game.moves,index); }
+function gameGrades() {
+  const grades=[];
+  gradesThrough(state.results,state.game.moves,state.game.moves.length,grades);
+  return grades;
+}
 function gradeContext(results,moves,index) {
   const history=gradingHistory(moves),moveIndex=history.moveIndex+index-1;
   return {previous:results.get(index-2),previousMove:history.moves[moveIndex-1],previousGrade:gradesThrough(results,moves,index-1),moves:history.moves,moveIndex};
@@ -446,14 +452,16 @@ function renderAnalysis() {
   renderArrow();
 }
 
-function renderMoves(scroll = false) {
+function renderMoves(scroll = false, grades = gameGrades()) {
   rememberMoveListScroll();
+  // Recompute the dependent grade chain once for this render. Calling
+  // gradeAt separately for every cell repeats all preceding moves.
   const rows = new Map();
   let visible=0;
   const loss=Number($('move-filter').value), side=$('move-side').value;
   state.game.moves.forEach((move,i) => {
     if(side!=='all'&&move.color!==side)return;
-    if(loss) { const grade=gradeAt(i+1); if(!grade||(loss===200 ? grade.key!=='blunder' : grade.severity<({50:1,100:2}[loss])))return; }
+    if(loss) { const grade=grades[i]; if(!grade||(loss===200 ? grade.key!=='blunder' : grade.severity<({50:1,100:2}[loss])))return; }
     visible++;
     const number = move.before.split(' ')[5];
     if (!rows.has(number)) rows.set(number, { w:null,b:null });
@@ -462,7 +470,7 @@ function renderMoves(scroll = false) {
   const cell = item => {
     if (!item) return '<span></span>';
     const { move,index } = item;
-    const grade = gradeAt(index);
+    const grade = grades[index-1];
     const badge = grade && grade.key !== 'good' ? `<span class="move-badge ${grade.key}" title="${grade.label}">${grade.symbol}</span>` : '';
     return `<button data-index="${index}" class="move-button${state.index === index ? ' current' : ''}" aria-label="${escape(`${move.before.split(' ')[5]}${move.color === 'w' ? '. 백' : '... 흑'} ${move.san}${grade ? ` ${grade.label}` : ''}`)}" aria-current="${state.index === index ? 'step' : 'false'}"><span>${escape(move.san)}</span>${badge}<span class="move-score" title="${state.results.has(index)?`이 수를 둔 뒤의 평가 · ${evaluationHint()}`:'아직 분석되지 않은 국면'}">${displayScore(state.results.get(index)?.score)}</span></button>`;
   };
@@ -676,19 +684,22 @@ function renderChart() {
   $('chart-empty').hidden = results.size > 0;
 }
 
-function renderReview() {
+function renderReview(grades = gameGrades()) {
   const counts = Object.fromEntries(['w','b'].map(color=>[color,Object.fromEntries(Object.keys(MOVE_GRADES).map(key=>[key,0]))]));
   const critical = [];
   let reviewed = 0;
   state.game.moves.forEach((move,i) => {
-    const grade = gradeAt(i+1);
+    const grade = grades[i];
     if (grade) { counts[move.color][grade.key]++; reviewed++; if (grade.severity >= 2) critical.push({ index:i+1,move,...grade }); }
   });
   if (!reviewed) { $('review-content').innerHTML = '<div class="summary-empty">전체 대국 분석 후 수별 분류가 표시됩니다.</div>'; return; }
   $('review-content').innerHTML = `<div class="summary-counts">${['w','b'].map(color => `<div class="summary-player"><h4>${color === 'w' ? '♔' : '♚'} ${escape(state.game.headers[color === 'w' ? 'White' : 'Black'] || (color === 'w' ? '백' : '흑'))}</h4>${Object.entries(MOVE_GRADES).map(([key,{label,symbol}]) => `<div class="summary-stat"><span><i class="grade-icon ${key}" aria-hidden="true">${symbol}</i>${label}</span><b>${counts[color][key]}</b></div>`).join('')}</div>`).join('')}</div><p class="review-explanation">${reviewed} / ${state.game.moves.length}번 이동 분류 완료 · ${[...state.results.values()].some(r=>r.overview)?'빠른 검토 포함':'정밀 검토'}</p><details class="grading-guide"><summary>수 분류 기준</summary><p>${GRADING_BASIS}</p><p>탁월수: 합법적인 교환에서 기물을 내줄 수 있지만 유리하거나 대등한 평가를 유지한 좋은 희생입니다. 다른 기물을 내주거나 이미 공격받던 기물을 계속 내주는 경우에는 수락 분기를 추가로 검증합니다. 희생 없는 대안으로 이미 쉽게 이기는 국면은 제외합니다. 훌륭한 수: 같은 깊이의 다른 후보보다 예상 승점을 10%p 이상 지킨 최선의 수로, 단순 되잡기와 유일한 합법 수는 제외합니다. 놓친 기회: 상대의 뚜렷한 실수로 생긴 공격·방어 기회를 살리지 못한 경우. 이론: 공개 오프닝 목록에 등록된 수순과 일치한 수입니다.</p><p>탁월수·훌륭한 수·놓친 기회의 세부 조건은 앱 자체 추정이며, Chess.com의 비공개 레이팅별 판정과 일치하지 않을 수 있습니다. 이론은 등록된 수순에 한하며 모든 오프닝을 포함하지는 않습니다.</p><p>최선수와 실전 수는 같은 출발 국면에서 비교합니다. 그래프 점수는 각 국면을 독립적으로 분석한 값입니다. 예상 승점은 두는 쪽의 폰 단위 평가를 1 ÷ (1 + exp(−평가 ÷ 2.5))로 환산합니다. 체크메이트는 0 또는 1로 계산합니다.</p><p><a href="https://support.chess.com/en/articles/8572705-how-are-moves-classified-what-is-a-blunder-or-brilliant-etc" target="_blank" rel="noopener noreferrer">Chess.com 공식 분류 설명</a> · <a href="https://github.com/lichess-org/chess-openings" target="_blank" rel="noopener noreferrer">오프닝 자료 · CC0</a></p></details>${critical.length ? '<h3>다시 살펴볼 수</h3>' : ''}${critical.sort((a,b) => b.pointsLoss-a.pointsLoss).slice(0,5).map(item => `<button class="critical-button" data-review-index="${item.index}"><span>${escape(item.move.before.split(' ')[5])}${item.move.color === 'w' ? '.' : '...'} ${escape(item.move.san)} <small>(${item.move.color === 'w' ? '백' : '흑'})</small></span><span>${item.label} ↗</span></button>`).join('')}`;
 }
 
-function renderResults() { renderAnalysis(); renderMoves(); renderChart(); renderReview(); renderStudy(); }
+function renderResults() {
+  const grades=gameGrades();
+  renderAnalysis(); renderMoves(false,grades); renderChart(); renderReview(grades); renderStudy();
+}
 function renderAll() { renderBoard(); renderResults(); }
 
 function pausePlayback() {
