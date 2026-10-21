@@ -3,7 +3,7 @@ import { StockfishEngine } from './engine.js';
 import { reviewMove } from './review.js';
 import { ENGINES, DEFAULT_ENGINE_ID, REVIEW_ENGINE_ID, AUTO_THREAD_LABEL, availableReviewWorkers, automaticThreads, engineId, normalizePerformance, searchOptions, reviewOptions, gameReviewOptions, analysisKey } from './engine-options.js';
 import { BackgroundReview } from './background-review.js';
-import { explorationChart } from './exploration-chart.js';
+import { explorationChart, seedExplorationBase } from './exploration-chart.js';
 import { pieceSvg, pieceSnapshot, pieceTransitions, StepNavigation, capturedPieces, capturedMarkup } from './pieces.js';
 import { BoardAnnotations } from './annotations.js';
 import { SAMPLE_PGN } from './sample.js';
@@ -62,6 +62,7 @@ const backgroundReview=new BackgroundReview({
     if(job.renderFrame)cancelAnimationFrame(job.renderFrame);
     completionAlerts.cancel(job.id);
     if(!ownsReview(job))return;
+    seedExplorationBase(state.game,state.line,state.results);
     renderResults();persist();
     if(backgroundReview.active)return;
     const explanation=deferredExplanation,analysis=deferredAnalysis;

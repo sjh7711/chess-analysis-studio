@@ -1,6 +1,18 @@
 const hasScore = result => ['cp', 'mate'].includes(result?.score?.type)
   && Number.isFinite(result.score.value);
 
+// A branch opened before its source was analyzed must acquire that completed
+// root before reviewing its first move. Keep independent or frozen roots intact.
+export function seedExplorationBase(game,line,gameResults) {
+  if(!line||line.explanationSnapshot||line.kind==='edited'||line.results.has(0))return false;
+  const index=line.prefixMoves?.length;
+  if(!Number.isInteger(index)||game.positions[index]!==line.base.fen())return false;
+  const result=gameResults.get(index);
+  if(!hasScore(result))return false;
+  line.results.set(0,result);
+  return true;
+}
+
 // Chart the route actually being explored: the game's past, then this branch.
 // Future positions in the original game are not evidence for the new branch.
 export function explorationChart(game, line, gameResults) {

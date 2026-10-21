@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { explorationChart } from '../src/exploration-chart.js';
+import { explorationChart, seedExplorationBase } from '../src/exploration-chart.js';
 import { parseGame, gameAt } from '../src/chess-core.js';
 import { AnalysisLine } from '../src/study.js';
 
@@ -8,6 +8,28 @@ const cp = value => ({ score: { type: 'cp', value } });
 const mate = (value, winner = 'w') => ({ score: { type: 'mate', value, winner } });
 const game = parseGame('1. e4 e5 2. Nf3 Nc6 3. Bb5 a6 *');
 const evaluations = () => new Map(game.positions.map((_, index) => [index, cp(index * 10)]));
+
+test('a branch created before review receives its completed source for first-move grading',()=>{
+  const line=new AnalysisLine(gameAt(game,2),['g1f3']),original=evaluations();
+  assert.equal(line.results.has(0),false);
+  assert.equal(seedExplorationBase(game,line,original),true);
+  assert.equal(line.results.get(0),original.get(2));
+  const ownRoot=cp(-100);line.results.set(0,ownRoot);
+  assert.equal(seedExplorationBase(game,line,original),false);
+  assert.equal(line.results.get(0),ownRoot);
+});
+
+test('seeding waits for a scored source and never imports an edited or frozen history',()=>{
+  const original=evaluations();
+  for(const kind of ['edited','frozen','unmatched','missing']){
+    const line=new AnalysisLine(gameAt(game,2));
+    if(kind==='edited')line.kind='edited';
+    if(kind==='frozen')line.explanationSnapshot=true;
+    if(kind==='unmatched')line.prefixMoves=[];
+    assert.equal(seedExplorationBase(game,line,kind==='missing'?new Map():original),false);
+    assert.equal(line.results.has(0),false);
+  }
+});
 
 test('an exploration with no new moves retains the scored original history through its starting position', () => {
   const original = evaluations(), line = new AnalysisLine(gameAt(game, 4));
