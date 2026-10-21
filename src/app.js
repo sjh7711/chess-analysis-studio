@@ -2,6 +2,7 @@ import { Chess, parseGame, gameAt, classifyMove, hasMoveReview, assessedMoveResu
 import { StockfishEngine } from './engine.js';
 import { ENGINES, DEFAULT_ENGINE_ID, REVIEW_ENGINE_ID, AUTO_THREAD_LABEL, availableReviewWorkers, automaticThreads, engineId, normalizePerformance, searchOptions, reviewOptions, gameReviewOptions, analysisKey } from './engine-options.js';
 import { BackgroundReview } from './background-review.js';
+import { ContinuationAnalysis } from './continuation-analysis.js';
 import { ReviewWorkerPool } from './review-pool.js';
 import { analyzeForeground } from './foreground-analysis.js';
 import { isPositionResultCached } from './analysis-cache.js';
@@ -44,6 +45,22 @@ let selectedEngine = DEFAULT_ENGINE_ID, performanceOptions = normalizePerformanc
 const state = { game:parseGame(SAMPLE_PGN), index:59, flipped:false, results:new Map(), line:null, editor:null, playing:false, selected:null, mode:null, error:null, tab:'moves' };
 const annotations=new BoardAnnotations($('board'),{isFlipped:()=>state.flipped,enabled:()=>!state.editor,toggleButton:$('annotation-mode'),clearButton:$('annotation-clear')});
 let analysisPool=null,foregroundAbort=null,generation = 0, debounce, toastTimer, pendingPromotion, draggedSquare, suppressClickUntil = 0;
+let continuationRenderFrame=0;
+const continuationAnalysis=new ContinuationAnalysis({
+  onStart:updateContinuationProgress,
+  onResult:updateContinuationProgress,
+  onComplete(job){
+    updateContinuationProgress(job);
+    if(ownsContinuation(job)&&state.line===job.line&&!state.editor&&!job.line.explanationSnapshot)
+      scheduleAnalysis();
+  },
+  onError(job,error){
+    updateContinuationProgress(job);
+    if(ownsContinuation(job)&&state.line===job.line&&error.name!=='AbortError')
+      toast('수순의 일부 국면을 분석하지 못했습니다. 현재 국면 재분석으로 다시 시도할 수 있습니다.',true);
+  },
+  onSettled:updateContinuationProgress,
+});
 const backgroundReview=new BackgroundReview({
   onStart(job){
     completionAlerts.begin(job.id);
@@ -171,6 +188,44 @@ function sharedEnginePool() {
   analysisPool.setConcurrency(performanceOptions.threads);
   return analysisPool;
 }
+function ownsContinuation(job) {
+  return job.game===state.game&&job.configKey===configKey()&&job.line.graphCompletion
+    &&(state.line===job.line||studyScenes.peek(state.game)?.line===job.line);
+}
+function updateContinuationProgress(job) {
+  if(!ownsContinuation(job)||job.line.graphAnalysis?.id!==job.id)return;
+  Object.assign(job.line.graphAnalysis,{completed:job.completed,total:job.total,status:job.status});
+  if(continuationRenderFrame)return;
+  continuationRenderFrame=requestAnimationFrame(()=>{
+    continuationRenderFrame=0;
+    if(ownsContinuation(job)&&state.line===job.line&&!state.editor){
+      renderAnalysis();renderChart();renderStudy();
+    }
+  });
+}
+function stopContinuation() {
+  const job=continuationAnalysis.stop();
+  if(job&&job.line.graphAnalysis?.id===job.id)delete job.line.graphAnalysis;
+  if(continuationRenderFrame)cancelAnimationFrame(continuationRenderFrame);
+  continuationRenderFrame=0;
+}
+function completeContinuation(line=state.line) {
+  if(!line?.graphCompletion)return;
+  const key=configKey(),route=line.steps.map(step=>step.uci).join(' ');
+  if(line.graphAnalysis?.status==='complete'&&line.graphAnalysis.configKey===key
+    &&line.graphAnalysis.route===route
+    &&Array.from({length:line.steps.length+1},(_,index)=>line.results.get(index))
+      .every(result=>isPositionResultCached(result,key)))return;
+  const hash=performanceOptions.hash,selected=selectedEngine;
+  void continuationAnalysis.start({game:state.game,line,pool:sharedEnginePool(),
+    workerKey:`${selected}:${hash}:1`,
+    createWorker:()=>new StockfishEngine(Worker,{engineId:selected,hash,threads:1}),
+    options:searchOptions(Number($('depth').value),{...performanceOptions,threads:1}),
+    configKey:key,isCached:result=>isPositionResultCached(result,key),owns:ownsContinuation});
+  const job=continuationAnalysis.active;
+  if(job?.line===line)line.graphAnalysis={id:job.id,configKey:key,route,
+    completed:job.completed,total:job.total,status:job.status};
+}
 function foregroundLease(run,task,{engineId:selected=selectedEngine,hash=performanceOptions.hash}={}) {
   const request=new AbortController();
   foregroundAbort=request;
@@ -200,9 +255,15 @@ function stopJob() {
 
 function scheduleAnalysis(autoReview = false, force = false) {
   if (state.editor) return;
-  // A bulb is a frozen, verified example. Advancing it does not need another
-  // MultiPV search of every displayed child position.
-  if (state.line?.explanationSnapshot) { schedulePlayback(); return; }
+  // A frozen explanation keeps its board and commentary while its entire
+  // graph is completed independently of the playback cursor.
+  if (state.line?.explanationSnapshot) { completeContinuation();schedulePlayback();return; }
+  if(!force&&state.line?.graphCompletion){
+    completeContinuation();
+    if(state.line.graphAnalysis?.status!=='complete'){
+      renderAnalysis();renderStudy();schedulePlayback();return;
+    }
+  }
   stopJob();
   renderAnalysis();
   if (state.line) renderStudy();
@@ -217,8 +278,8 @@ function scheduleAnalysis(autoReview = false, force = false) {
 
 async function analyzeCurrent(force = false) {
   if (state.editor) return;
-  if (state.line?.explanationSnapshot && !force) { schedulePlayback(); return; }
-  if (force && state.line) state.line.explanationSnapshot=false;
+  if (state.line?.explanationSnapshot && !force) { completeContinuation();schedulePlayback();return; }
+  if (force && state.line) { stopContinuation();state.line.explanationSnapshot=false; }
   const positionKey=configKey();
   // Inherited game scores may be displayed while waiting, but a branch must
   // grade its parent and child with the same position policy at every worker count.
@@ -227,7 +288,7 @@ async function analyzeCurrent(force = false) {
   const move=state.line?state.line.steps[position-1]:state.game.moves[position-1],before=results.get(position-1);
   const needsReview=move && (state.line ? !cacheMatches(before)||!hasMoveReview(before,cached,move)
     : cacheMatches(before)&&!hasMoveReview(before,cached,move));
-  if (!force && cacheMatches(cached) && !needsReview) { renderAnalysis(); schedulePlayback(); return; }
+  if (!force && cacheMatches(cached) && !needsReview) { completeContinuation();renderAnalysis();schedulePlayback();return; }
   stopJob();
   const run = generation;
   const chess = currentChess();
@@ -258,7 +319,7 @@ async function analyzeCurrent(force = false) {
   } catch (error) {
     if (run === generation && error.name !== 'AbortError') { state.error = error.message; toast(error.message, true); }
   } finally {
-    if (run === generation) { state.mode = null; renderResults(); schedulePlayback(); }
+    if (run === generation) { state.mode = null;completeContinuation(line);renderResults();schedulePlayback(); }
   }
 }
 
@@ -270,6 +331,7 @@ async function analyzeGame(restart = false) {
   pausePlayback();
   stopJob();
   if(selectedEngine!==REVIEW_ENGINE_ID) {
+    stopContinuation();
     selectedEngine=REVIEW_ENGINE_ID;
     studyScenes.invalidate();
     state.results.clear();insightContext=null;coachCache=null;coachExpanded=null;
@@ -609,15 +671,19 @@ function startInsight(kind,scope='core') {
   const line = createInsightLine(context,kind,scope);
   if (!line) {toast('저장된 예상 수순을 열 수 없습니다. 현재 국면을 다시 분석해 주세요.',true);return;}
   line.explanationSnapshot=true;
+  line.graphCompletion=scope==='full';
+  if(updated)line.appliedRefinement=cached;
   line.explanationRequest={kind,options,engineKey};
   line.refinementStatus=cached?(updated?`심층 확인 완료 · 깊이 ${cached.depth}${cached.goalReached?'':' · 시간 내 도달 깊이'}`:'시간 내 추가 깊이에 도달하지 못해 기존 설명을 유지합니다'):'';
   line.seek(1);
   pausePlayback(); stopJob();
   coachExpanded=null;
   insightContext=context;
+  stopContinuation();
   studyScenes.discard();
   state.line = line; state.selected = null; state.tab = 'study';
   state.error=null;
+  completeContinuation(line);
   renderAll();
   if (!cached) void deepenExplanation(context,kind,options,engineKey,line);
   document.querySelector('.workspace').scrollIntoView({block:'start',behavior:'instant'});
@@ -646,6 +712,7 @@ async function deepenExplanation(context,kind,options,engineKey,line) {
 }
 
 function stageExplanationRefinement(context,kind,result,line) {
+  if(line.appliedRefinement===result){completeContinuation(line);return;}
   const insight=refineInsight(context,kind,result);
   const updated=insight&&{...context,insight};
   const replacement=updated&&createInsightLine(updated,kind,line.reviewScope||'core');
@@ -660,7 +727,11 @@ function applyExplanationRefinement(line) {
     || !mergeExplanationLine(line,pending.replacement))return false;
   insightContext=pending.context;
   line.refinementStatus=`심층 분석 자동 반영 · 깊이 ${pending.result.depth}${pending.result.goalReached?'':' · 시간 내 도달 깊이'}`;
+  line.appliedRefinement=pending.result;
   delete line.pendingRefinement;
+  stopContinuation();
+  delete line.graphAnalysis;
+  completeContinuation(line);
   return true;
 }
 
@@ -705,12 +776,17 @@ function currentChart() {
 
 function renderChart() {
   const {branch,results,cursor,count}=currentChart();
+  const graph=branch?.graphCompletion?branch.graphAnalysis:null;
   $('chart-start').textContent = '시작';
   $('chart-last').textContent = count>1 ? `${count-1}번 이동` : '현재 국면';
-  $('chart-status').textContent = branch?.explanationSnapshot ? `설명 수순 · 근거 깊이 ${branch.sourceDepth}`
+  $('chart-status').textContent = graph
+    ? `수순 평가 ${graph.completed} / ${graph.total} 국면 · ${graph.status==='complete'?'완료':graph.status==='error'?'일부 분석 실패':'분석 중'}`
+    : branch?.explanationSnapshot ? `설명 수순 · 근거 깊이 ${branch.sourceDepth}`
     : `${evaluationSide()} 기준 · ${state.editor ? '배치 편집 중' : currentGameReview() ? branch ? '자유 탐색 우선 · 원본 기보 분석도 계속' : '전체 대국 분석 중' : results.size===count ? '분석 완료' : `${results.size}/${count} 국면 분석`}`;
   $('chart-status').title = evaluationHint();
-  $('chart-empty').textContent=branch
+  $('chart-empty').textContent=branch?.graphCompletion
+    ? '열어 둔 수순의 모든 국면을 분석해 그래프를 완성합니다.'
+    : branch
     ? currentGameReview()?'다음으로 비는 작업에서 자유 탐색을 먼저 분석합니다.':'현재 탐색 위치를 분석하면 그래프에 표시됩니다.'
     : '아직 분석되지 않은 국면입니다.';
   $('chart-top-label').textContent = `${evaluationSide()} 우세`;
@@ -861,10 +937,13 @@ function playMove(uci) {
   try {
     const line = state.line || new AnalysisLine(currentChess(),[],currentResult());
     const move=line.play(uci);
+    stopContinuation();
+    delete line.graphAnalysis;
     studyScenes.discard();
     line.kind = 'manual';
-    for(const key of ['title','reviewKind','reviewScope','fullLength','focusNote','explanationSnapshot','refinementStatus','pendingRefinement'])delete line[key];
+    for(const key of ['title','reviewKind','reviewScope','fullLength','focusNote','explanationSnapshot','refinementStatus','pendingRefinement','appliedRefinement','explanationRequest'])delete line[key];
     state.line = line; state.selected = null; state.error = null; state.tab = 'study';
+    completeContinuation(line);
     renderAll(); scheduleAnalysis();
     void moveSounds.play(move);
   } catch { renderStudy(); toast('둘 수 없는 수입니다. 표시된 이동 칸을 선택하세요.',true); }
@@ -1044,6 +1123,7 @@ function squareClicked(square) {
 }
 
 function setGame(game, saved = null) {
+  stopContinuation();
   studyScenes.discard();
   pausePlayback(); stopGameReview(); stopJob(); state.game = game; state.index = game.moves.length; state.results = new Map(); state.line = null; state.editor = null; state.selected = null; state.error = null;
   selectedEngine=REVIEW_ENGINE_ID;
@@ -1091,7 +1171,7 @@ $('analyze-game').onclick = () => {
   analyzeGame(restart);
 };
 $('restart-game').onclick = () => analyzeGame(true);
-$('depth').onchange = () => { pausePlayback(); stopGameReview(); stopJob(); leaveExplanationSnapshot(); studyScenes.invalidate(); state.results.clear(); state.line?.results.clear(); insightContext=null; renderAll(); persist(); scheduleAnalysis(!state.line); };
+$('depth').onchange = () => { pausePlayback();stopContinuation();stopGameReview();stopJob();leaveExplanationSnapshot();studyScenes.invalidate();state.results.clear();state.line?.results.clear();insightContext=null;renderAll();persist();scheduleAnalysis(!state.line); };
 $('engine-settings-open').onclick = () => {
   $('engine-choice').value = selectedEngine;
   $('settings-depth').value = $('depth').value;
@@ -1121,12 +1201,13 @@ $('engine-settings-form').onsubmit = event => {
   const explanationOnly=!changed && nextPerformance.movetime!==performanceOptions.movetime;
   const reviewing=!!currentGameReview();
   $('engine-settings-dialog').close();
-  if(changed)stopGameReview();
+  if(changed){stopContinuation();stopGameReview();}
   pausePlayback();
   if(changed||(!schedulingOnly&&!explanationOnly))stopJob();
   if(state.line?.explanationSnapshot&&!schedulingOnly&&!explanationOnly){
     // Applying settings analyzes the displayed scene, including a bulb step.
     // Detach its frozen explanation without navigating back to the game move.
+    stopContinuation();
     state.line=new AnalysisLine(currentChess());
     state.line.kind='manual';state.selected=null;state.tab='study';
     coachExpanded=null;
@@ -1213,6 +1294,7 @@ $('editor-cancel').onclick=()=>{
 $('editor-apply').onclick=()=>{
   try {
     const chess=editedPosition(state.editor.board,state.editor.turn);
+    stopContinuation();
     studyScenes.discard();
     state.line=new AnalysisLine(chess); state.line.kind='edited'; state.editor=null; state.selected=null; state.tab='study';
     renderAll(); scheduleAnalysis();
@@ -1366,7 +1448,7 @@ document.addEventListener('keydown', event => {
   const action = {ArrowLeft:'prev',ArrowRight:'next',Home:'first',End:'last',f:'flip',F:'flip'}[event.key];
   if (action) { event.preventDefault(); $(action).click(); }
 });
-window.addEventListener('pagehide', () => { pausePlayback();stopJob();stopGameReview();persist();void analysisPool?.dispose(); });
+window.addEventListener('pagehide', () => { pausePlayback();stopContinuation();stopJob();stopGameReview();persist();void analysisPool?.dispose(); });
 document.addEventListener('visibilitychange',()=>{if(document.hidden){pausePlayback();renderStudy();}});
 
 // Reserve the move list itself, in addition to the chart and playback controls.

@@ -147,7 +147,7 @@ export class StudySceneStore {
     const {line}=this.#scene;
     line.results.clear();
     if (line.explanationSnapshot || line.kind==='pv') {
-      for (const key of ['explanationSnapshot','title','reviewKind','reviewScope','reviewIndex','fullLength','sourceDepth','sourceScore','startLabel','focusNote','refinementStatus','pendingRefinement','explanationRequest','conditional','bestResponse']) delete line[key];
+      for (const key of ['explanationSnapshot','title','reviewKind','reviewScope','reviewIndex','fullLength','sourceDepth','sourceScore','startLabel','focusNote','refinementStatus','pendingRefinement','explanationRequest','appliedRefinement','conditional','bestResponse']) delete line[key];
       line.kind='manual';
     }
     this.#scene.insightContext=null;
