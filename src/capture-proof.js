@@ -122,14 +122,24 @@ function snapshotLoss(root,line,snapshot,color){
 // all original scores and expected-point bands. This additional certificate
 // rechecks the actual history/PVs and provides only the smaller guaranteed
 // material deficit, never a remote PV's larger sampled loss.
-export function inspectCertifiedTacticalLoss({root,move,bestUci,playedPv,bestPv,playedSnapshot,bestSnapshot,minimum=3,nodeBudget}={}){
+export function inspectCertifiedTacticalLoss({root,move,bestUci,playedPv,bestPv,playedSnapshot,bestSnapshot,minimum=3,nodeBudget,allowLosingMates=false}={}){
   let work;
   try{
     work=workFor({nodeBudget});if(!validMinimum(minimum)||!move||!validUci(bestUci)||root.fen()!==move.before)return {evidence:null,work:{nodes:work.nodes,budget:work.budget}};
     if(!Array.isArray(playedPv)||playedPv[0]!==uci(move)||!playedPv[1]||!Array.isArray(bestPv)||bestPv[0]!==bestUci||bestUci===uci(move))throw Error('Unbound material PV.');
     const position=copyHistory(root,work),played=replay(position,playedPv,work),best=replay(position,bestPv,work);
     if(played.moves[0].after!==move.after||played.moves[0].color!==move.color||played.moves[0].piece!==move.piece)throw Error('Actual move mismatch.');
-    if(played.terminal||best.terminal||[...played.moves,...best.moves].some(step=>step.color===move.color&&step.promotion))throw Error('Terminal or promotion compensation.');
+    // The caller may separately certify that both completed engine branches
+    // end in the mover's forced loss. A draw or the mover's mate remains an
+    // invalid material-loss example, and ordinary CP reviews keep the stricter
+    // terminal guard.
+    const excludedTerminal=line=>{
+      if(!line.terminal)return false;
+      if(allowLosingMates!==true)return true;
+      const end=new Chess(line.moves.at(-1).after);
+      return !end.isCheckmate() || end.turn()!==move.color;
+    };
+    if(excludedTerminal(played)||excludedTerminal(best)||[...played.moves,...best.moves].some(step=>step.color===move.color&&step.promotion))throw Error('Terminal or promotion compensation.');
     const playedLoss=snapshotLoss(position,played,playedSnapshot,move.color),bestLoss=snapshotLoss(position,best,bestSnapshot,move.color);
     if(playedLoss===null||bestLoss===null||playedLoss-Math.max(0,bestLoss)<minimum)throw Error('Unproved relative material deficit.');
     const {proof,actualMove}=checkpoint(position,work,()=>{

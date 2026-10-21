@@ -71,7 +71,8 @@ export function refineInsight(context,kind,result) {
   if(kind==='alternative') {
     const details=insight.kind==='mistake'?mistakeDetails(move,before,assessedInsightResult(before,after,move,context),insight.grade,insight.response,source):null;
     const alternativeFact=alternativeExplanation(move,source,details?.alternativeFact);
-    return {...insight,alternative:source,alternativeFact,summary:details?details.summary:insight.summary};
+    return {...insight,alternative:source,alternativeFact,summary:details?details.summary
+      :goodMoveSummary(move,insight.purposeFact,insight.response,insight.sacrificeFact,insight.riskFact,insight.grade,source)};
   }
   const consequence=source.consequence;
   const details=insight.kind==='mistake'?mistakeDetails(move,before,assessedInsightResult(before,after,move,context),insight.grade,source,insight.alternative):null;
@@ -79,7 +80,7 @@ export function refineInsight(context,kind,result) {
   const openedRisk=insight.kind==='move'&&!insight.sacrificeFact?nearMaterialRisk(move,source):'';
   const responseFact=details?.responseFact||(opponentMate?mateFact:source.offer&&source.focus.payoff?sacrificeExplanation(move,source):mateFact||openedRisk||firstMoveFact(source));
   const purposeFact=insight.kind==='mistake'?insight.purposeFact:endingMovePurpose(move,insight.grade)||basicMoveComment(move,{...context,continuation:source});
-  const summary=details?.summary||goodMoveSummary(move,purposeFact,source,insight.sacrificeFact,openedRisk,insight.grade);
+  const summary=details?.summary||goodMoveSummary(move,purposeFact,source,insight.sacrificeFact,openedRisk,insight.grade,insight.alternative);
   return {...insight,response:source,responseFact,summary,purposeFact,riskFact:details?.riskFact||(opponentMate?mateFact:openedRisk||(source.score.type!=='mate' && consequence?.distant?distantRisk(consequence):'')),
     materialFact:source.score.type!=='mate'?nearMaterialNote(source):''};
 }
@@ -500,6 +501,68 @@ function alternativePayoffFact(line) {
     : `이어지는 예상 응수에서 ${concreteMoveText(finish)} ${result}`;
 }
 
+function alternativeCombination(line) {
+  const first=line.moves[0];
+  if(!first || !line.complete || line.invalid)return null;
+  for(let index=1;index<Math.min(line.moves.length-1,NEAR_CONSEQUENCE_PLIES);index++) {
+    const capture=line.moves[index],setup=line.moves[index-1],reply=line.moves[index+1];
+    if(capture.color===first.color || setup.color!==first.color || reply.color!==first.color
+      || !capture.captured || !reply.captured || setup.to!==capturedSquare(capture)
+      || (setup.promotion||setup.piece)!==capture.captured || capturedSquare(reply)!==capture.to
+      || reply.captured!==(capture.promotion||capture.piece) || !['n','b','r','q'].includes(capture.captured))continue;
+    const kind=reply.promotion?'promotion-recapture'
+      :setup.captured==='p' && capture.piece==='p' && reply.captured==='p' && /[+#]$/.test(reply.san)?'checking-pawn-exchange'
+      :index===1 && !setup.captured && !/[+#]$/.test(setup.san) && ['r','q'].includes(setup.piece)
+        && capture.piece===setup.piece && !reply.promotion?'equal-major-exchange':null;
+    if(!kind)continue;
+    let finish=index+1;
+    // A promotion with check can be followed by a capture of the other queen.
+    // Follow only this newly promoted piece, never a second same-type piece.
+    if(reply.promotion && line.moves[index+3]?.color===first.color
+      && line.moves[index+3].from===reply.to && line.moves[index+3].piece===reply.promotion
+      && line.moves[index+3].captured==='q' && line.moves[index+2]?.color!==first.color
+      && !(line.moves[index+2].captured && capturedSquare(line.moves[index+2])===reply.to))finish=index+3;
+    const exchange=exchangeEnd(line,finish);
+    if(exchange.incomplete || exchange.end>MAX_INSIGHT_PLIES)continue;
+    return {kind,setup:index-1,capture:index,reply:index+1,finish,end:exchange.end};
+  }
+  return null;
+}
+
+function alternativeCombinationFact(line) {
+  const proof=line.focus?.combination;
+  if(!proof)return '';
+  const setup=line.moves[proof.setup],capture=line.moves[proof.capture],reply=line.moves[proof.reply],finish=line.moves[proof.finish];
+  const preparation=proof.setup>0?`이어지는 예시에서 ${concreteMoveText(setup)} `:'';
+  const acceptance=`${preparation}예상 수순에서 상대가 ${capture.to}의 ${object(capture.captured)} ${PIECE_NAMES[capture.piece]}${capture.piece==='n'?'로':'으로'} 잡으면, `;
+  if(proof.kind==='promotion-recapture')return `${acceptance}${reply.from}의 폰으로 되잡으며 ${PIECE_NAMES[reply.promotion]}${reply.promotion==='n'?'로':'으로'} 승격합니다.${finish!==reply?` 이어지는 예시에서 승격한 ${PIECE_NAMES[reply.promotion]}${reply.promotion==='n'?'로':'으로'} ${capturedSquare(finish)}의 ${object(finish.captured)} 잡습니다.`:''}`;
+  if(proof.kind==='checking-pawn-exchange')return `${acceptance}${PIECE_NAMES[reply.piece]}${reply.piece==='n'?'로':'으로'} 그 폰을 되잡아 체크합니다. ${object(setup.piece)} 내주는 대신 폰 두 개를 잡으며 체크를 이어가는 예시입니다.`;
+  return `${acceptance}${PIECE_NAMES[reply.piece]}${reply.piece==='n'?'로':'으로'} 되잡아 ${PIECE_NAMES[setup.piece]}${setup.piece==='n'?'가':'이'} 하나씩 교환됩니다.`;
+}
+
+function minorExchange(move,line) {
+  if(!line.complete || line.invalid || line.score?.type==='mate')return null;
+  const prefix=[move],initial=materialBalance(pieces(new Chess(move.before))).difference;
+  for(const step of line.moves.slice(0,NEAR_CONSEQUENCE_PLIES)) {
+    prefix.push(step);
+    const captures=prefix.filter(next=>next.captured);
+    if(captures.some(next=>!['n','b'].includes(next.captured)) || prefix.some(next=>next.promotion))return null;
+    if(captures.length<2)continue;
+    if(captures.length!==2 || captures[0].color===captures[1].color)return null;
+    if(materialBalance(pieces(new Chess(step.after))).difference!==initial)return null;
+    const lost=captures.find(next=>next.color!==move.color),gained=captures.find(next=>next.color===move.color);
+    const own=`${side(move.color)} ${PIECE_NAMES[lost.captured]}`,enemy=`${side(gained.color==='w'?'b':'w')} ${PIECE_NAMES[gained.captured]}`;
+    const join=lost.captured==='n'?'와':'과',subject=gained.captured==='n'?'가':'이';
+    const where=capturedSquare(lost)===capturedSquare(gained)?`${capturedSquare(lost)}에서 ${own}${join} ${enemy}`
+      :`${capturedSquare(lost)}의 ${own}${join} ${capturedSquare(gained)}의 ${enemy}`;
+    const next=line.moves[prefix.length-1],follow=next?.captured && next.color!==step.color
+      && capturedSquare(next)===step.to && next.captured===(step.promotion||step.piece)
+      ?` 이어지는 예시에서 ${concreteMoveText(next,'possible')}`:'';
+    return {text:`예상 응수에서는 ${where}${subject} 교환됩니다.${follow}`,end:prefix.length-1};
+  }
+  return null;
+}
+
 function recaptureBaseline(move,context={}) {
   const moves=context.game?.moves||context.moves,index=context.game&&Number.isInteger(context.index)?context.index-1:context.moveIndex;
   const actualContext=Array.isArray(moves)&&Number.isInteger(index)
@@ -537,10 +600,11 @@ function focusContinuation(move,line,alternative=false,maxPlies=NEAR_CONSEQUENCE
   const offer=!alternative && line.moves[0]?.captured ? sacrificeCandidates(move).find(offer=>offer.captures.includes(line.pv[0])) : null;
   const payoff=offer?compensationPayoff(move,line):null;
   const purposePayoff=alternative?quietAlternativePayoff(line):null;
+  const combination=alternative?alternativeCombination(line):null;
   const trade=alternative?neutralExchange(line.moves[0],{...line,moves:line.moves.slice(1)},context):null;
-  const limit=payoff?MAX_INSIGHT_PLIES:maxPlies;
+  const limit=payoff||combination?MAX_INSIGHT_PLIES:maxPlies;
   const mate=line.moves.findIndex((step,index)=>index<limit && new Chess(step.after).isCheckmate());
-  const chosen=mate>=0?mate:payoff?payoff.index:purposePayoff?purposePayoff.index:trade?trade.end-1:nearLoss?nearLoss.end-1:recoveryEnd?recoveryEnd-1:consequence && (!consequence.distant || maxPlies>NEAR_CONSEQUENCE_PLIES && consequence.end<=maxPlies) ? consequence.ply-1 : 0;
+  const chosen=mate>=0?mate:payoff?payoff.index:purposePayoff?purposePayoff.index:combination?combination.finish:trade?trade.end-1:nearLoss?nearLoss.end-1:recoveryEnd?recoveryEnd-1:consequence && (!consequence.distant || maxPlies>NEAR_CONSEQUENCE_PLIES && consequence.end<=maxPlies) ? consequence.ply-1 : 0;
   const exchange=exchangeEnd(line,chosen);
   // Complete a nearby tactical exchange, including a checking intermezzo,
   // rather than reporting the temporary material balance at the six-ply cut.
@@ -559,6 +623,7 @@ function focusContinuation(move,line,alternative=false,maxPlies=NEAR_CONSEQUENCE
   }
   line.focus={length:end,note,incomplete,payoff};
   if(purposePayoff)line.focus.purposePayoff=purposePayoff;
+  if(combination)line.focus.combination=combination;
   if(recoveryEnd)line.focus.recoveredExchange=true;
   if(offer)line.offer={...offer};
   line.consequence=consequence;
@@ -630,8 +695,8 @@ export function explainMove(move,before,after,context={}) {
   const primaryFact=response.offer && response.focus.payoff ? sacrificeExplanation(move,response) : '';
   const mate=verifiedMate(response),mateFact=verifiedMateFact(response,move.color),opponentMate=mate&&mate.winner!==move.color;
   const openedRisk=!sacrificeFact&&!primaryFact?nearMaterialRisk(move,response):'';
-  const summary=goodMoveSummary(move,purpose,response,sacrificeFact,openedRisk,grade);
   const alternativeCoach=coachAlternative(alternative);
+  const summary=goodMoveSummary(move,purpose,response,sacrificeFact,openedRisk,grade,alternative,alternativeCoach);
   return {kind:'move',grade,moveFact:moveText(move),purposeFact:purpose,reason,summary,
     response,responseFact:opponentMate?mateFact:primaryFact||mateFact||openedRisk||firstMoveFact(response),alternative,
     alternativeFact:alternativeExplanation(move,alternative,alternativeCoach?.text),
@@ -669,16 +734,46 @@ function endingMovePurpose(move,grade) {
   return '';
 }
 
-function goodMoveSummary(move,purpose,response,sacrificeFact='',openedRisk='',grade=null) {
+function shortAlternativeMate(move,line) {
+  const mate=line&&verifiedMate(line);
+  if(!mate || mate.winner!==move.color || Math.abs(line.score.value)>4 || line.pv[0]===uciMove(move))return '';
+  return `대신 ${concreteMoveText(line.moves[0],'possible')} ${verifiedMateFact(line,move.color)}`;
+}
+
+function shortAlternativePurpose(move,line,response,alternative=null) {
+  if(!line?.complete || line.invalid || line.pv[0]===uciMove(move))return '';
+  alternative=alternative||coachAlternative(line);
+  const plan=alternative&&coachPlan(move,response);
+  if(!alternative || !plan)return '';
+  const combination=alternativeCombinationFact(line);
+  if(combination)return `다른 후보로는 ${concreteMoveText(alternative.move,'possible')} ${combination}`;
+  const escapingAttack=alternative.kind==='escape' && alternative.targets?.some(target=>VALUES[target.type]>=3
+    && !plan.targets?.some(actual=>actual.square===target.square && actual.type===target.type));
+  const relevant=['defend','develop','pawn-plan','discovered-defense','block','unpin','rook-connection'].includes(alternative.kind)
+    || alternative.defendedPawns?.length || escapingAttack;
+  if(!relevant || !alternative.benefit || alternative.kind===plan.kind && !alternative.defendedPawns?.length && !escapingAttack)return '';
+  if(alternative.kind==='develop' && ['n','b'].includes(move.piece))return '';
+  const after=new Chess(move.after),enemy=move.color==='w'?'b':'w';
+  const protectedTargets=alternative.defendedPawns||alternative.kind==='defend'&&alternative.targets||[];
+  if(protectedTargets.length && !protectedTargets.some(target=>after.get(target.square)?.color===move.color
+    && legallyAttacked(after,target.square,enemy) && !legalGuard(after,target.square,move.to,move.color)))return '';
+  const better=alternative.move;
+  return `다른 후보로는 ${object(better.piece)} ${better.from}에서 ${better.to}로 옮겨 ${alternative.benefit} 수도 있었습니다.`;
+}
+
+function goodMoveSummary(move,purpose,response,sacrificeFact='',openedRisk='',grade=null,alternative=null,alternativeCoach=null) {
   const verified=verifiedMate(response);
   const ending=endingOutcome(move,grade);
   if(verified && verified.winner!==move.color)return [verifiedMateFact(response,move.color),ending].filter(Boolean).join(' ');
   if(sacrificeFact)return sacrificeFact;
   if(response.offer && response.focus.payoff)return sacrificeExplanation(move,response);
-  if(verified)return [verifiedMateFact(response,move.color),ending].filter(Boolean).join(' ');
+  const otherMate=shortAlternativeMate(move,alternative);
+  if(verified)return [verifiedMateFact(response,move.color),otherMate,ending].filter(Boolean).join(' ');
   if(ending)return [purpose,ending].filter(Boolean).join(' ');
   const mate=response.moves.slice(0,NEAR_CONSEQUENCE_PLIES).find(step=>step.color===move.color && new Chess(step.after).isCheckmate());
-  return mate?`이 예상 수순에서는 ${mateFact(mate)}`:openedRisk?`${purpose} ${openedRisk}`:purpose;
+  const trade=!openedRisk?minorExchange(move,response)?.text:'';
+  return [mate?`이 예상 수순에서는 ${mateFact(mate)}`:openedRisk?`${purpose} ${openedRisk}`:purpose,trade,
+    otherMate||shortAlternativePurpose(move,alternative,response,alternativeCoach)].filter(Boolean).join(' ');
 }
 
 function nearMaterialRisk(move,line) {
@@ -766,7 +861,11 @@ function pawnPurposePlan(move,before,after) {
     && !before.attackers(piece.square,move.color).includes(move.from)).sort((a,b)=>VALUES[b.type]-VALUES[a.type]);
   if(attacked.length) {
     const action=`${targetName(attacked[0])}${attacked[0].type==='n'?'를':'을'} 공격`;
-    return {kind:'attack',text:action+'합니다.',benefit:action+'할',targets:[attacked[0]]};
+    const defended=pieces(after).filter(piece=>piece.color===move.color && piece.type==='p' && piece.square!==move.to
+      && legallyAttacked(before,piece.square,move.color==='w'?'b':'w')
+      && legalGuard(after,piece.square,move.to,move.color) && !legalGuard(before,piece.square,move.from,move.color));
+    const support=defended.length?`공격받던 ${defended.map(piece=>piece.square).join('·')}의 폰을 지키면서 `:'';
+    return {kind:'attack',text:support+action+'합니다.',benefit:support+action+'할',targets:[attacked[0]],defendedPawns:defended};
   }
   const home=move.color==='w'?'1':'8', bishops=pieces(after).filter(piece=>piece.color===move.color && piece.type==='b' && piece.square[1]===home);
   const supported=pieces(after).filter(piece=>piece.color===move.color && piece.type==='p' && piece.square!==move.to
@@ -1100,7 +1199,7 @@ function coachAlternative(line) {
     :move.captured || move.promotion || /[+#]$/.test(move.san) || /[kq]/.test(move.flags) || !plan.benefit
     ? recommendedMove(line)
     : `대신 ${side(move.color)} ${object(move.piece)} ${move.from}에서 ${move.to}로 옮겨 ${plan.benefit} 수 있었습니다.`;
-  const payoff=alternativePayoffFact(line);
+  const payoff=alternativeCombinationFact(line)||alternativePayoffFact(line);
   return {...plan,text:text+(plan.cost?` ${plan.cost}`:'')+(payoff?` ${payoff}`:'')};
 }
 
@@ -1155,6 +1254,25 @@ function exceptionalMoveComment(move,context={}) {
   return basicMoveComment(move,context);
 }
 
+// A victim captured in both examples is not evidence that the played move
+// uniquely exposed it. Compare the original stationary piece on both boards,
+// never a different same-type piece that later reaches that square.
+function sharedCapture(move,reply,alternative) {
+  const capture=reply.consequence?.capture;
+  if(!capture || !reply.complete || reply.invalid || !alternative.complete || alternative.invalid
+    || reply.consequence.distant || reply.nearLoss && reply.nearLoss.loss!==reply.consequence.loss)return '';
+  const square=capturedSquare(capture),before=new Chess(move.before),after=new Chess(move.after);
+  if(before.get(square)?.type!==capture.captured || before.get(square)?.color!==move.color
+    || after.get(square)?.type!==capture.captured || after.get(square)?.color!==move.color || move.from===square)return '';
+  const stationary=(moves,index)=>!moves.slice(0,index).some(step=>step.from===square || step.to===square || step.captured&&capturedSquare(step)===square);
+  const actualIndex=reply.moves.indexOf(capture);
+  if(!stationary(reply.moves,actualIndex) || reply.moves.slice(0,reply.consequence.end).filter(step=>step.captured && step.color!==move.color).length!==1)return '';
+  const index=alternative.moves.findIndex((step,index)=>index<NEAR_CONSEQUENCE_PLIES && step.color!==move.color
+    && step.captured===capture.captured && capturedSquare(step)===square && stationary(alternative.moves,index));
+  if(index<0)return '';
+  return `실전 수 뒤와 대안의 예상 수순 모두에서 ${square}의 ${side(move.color)} ${PIECE_NAMES[capture.captured]}${capture.captured==='n'?'가':'이'} 잡히는 예시입니다.`;
+}
+
 function mistakeDetails(move,before,after,grade,reply,alternativeLine) {
   const alternative=coachAlternative(alternativeLine),opponent=reply.moves[0],consequence=reply.consequence;
   let alternativeFact=alternativeExplanation(move,alternativeLine,alternative?.text);
@@ -1166,8 +1284,11 @@ function mistakeDetails(move,before,after,grade,reply,alternativeLine) {
   }
   let responseFact=coachReply(reply);
   const materialRisk=nearMaterialRisk(move,reply);
-  if(materialRisk)responseFact=materialRisk;
+  const commonCapture=sharedCapture(move,reply,alternativeLine),trade=minorExchange(move,reply)?.text;
+  if(commonCapture)responseFact=commonCapture;
+  else if(materialRisk)responseFact=materialRisk;
   else if(consequence && !consequence.distant)responseFact=lossCause(move,reply,consequence.capture);
+  else if(trade)responseFact=trade;
   else if(opponent?.captured && reply.focus.incomplete)responseFact=responseFact.replace(/있습니다\.$/,'있지만, 후속 응수가 부족해 교환의 최종 결과는 아직 확인되지 않았습니다.');
   const opportunity=coachOpportunity(move,alternative);
   // Winning evaluations can remain mates on both branches. An immediately
@@ -1188,9 +1309,12 @@ function mistakeDetails(move,before,after,grade,reply,alternativeLine) {
   else if(ownMate)reason=responseFact;
   else if(reply.score?.type==='mate' && mateWinner(reply.score)!==move.color)reason=`분석은 상대 메이트를 예상하지만, 전체 수순은 아직 확인되지 않았습니다.${responseFact?` ${responseFact}`:''}`;
   else if(before.score.type==='mate' && mateWinner(before.score)===move.color && mateWinner(reply.score)!==move.color)reason='이 수 뒤에도 메이트가 이어지는지는 이번 수순에서 확인되지 않았습니다.';
+  else if(commonCapture)reason=commonCapture;
   else if(materialRisk)reason=materialRisk;
   else if(consequence && !consequence.distant)reason=responseFact;
   else if(opportunity)reason=opportunity+(opponent?.san.endsWith('+')&&responseFact?` ${responseFact}`:'');
+  else if(trade)reason=trade;
+  else if(consequence?.distant)reason=basicMoveComment(move);
   else if(consequence)reason=distantRisk(consequence);
   else reason=responseFact;
   const survivingMate=shortMateMiss && verified?.winner===move.color?`실전 수 뒤에도 ${mateExplanation}`:'';

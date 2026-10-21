@@ -23,6 +23,7 @@ test('normal grades retain the alternative pawn move that opens a bishop develop
   const original=JSON.stringify({context,before,after}),insight=explainMove(move,before,after,context);
   assert.equal(insight.grade.severity,0);
   assert.match(insight.alternativeFact,/e7에서 e5.*f8의 비숍이 나올 길을 열/);
+  assert.match(insight.summary,/다른 후보로는.*f8의 비숍이 나올 길을 열/);
   assert.doesNotMatch(insight.alternativeFact,/강제|승리|반드시/);
   const line=createInsightLine({...context,before,after,insight},'alternative');
   assert.equal(line.base.fen(),move.before);assert.equal(line.cursor,0);
@@ -35,6 +36,7 @@ test('a normally graded alternative explains development with a concrete legal a
   const insight=explainMove(context.move,cp(0,context.alternative),cp(0,context.response),context);
   assert.equal(insight.grade.severity,0);
   assert.match(insight.alternativeFact,/c1에서 f4.*e5의 나이트를 공격하며 전개/);
+  assert.match(insight.summary,/다른 후보로는.*e5의 나이트를 공격하며 전개/);
 });
 
 test('an escaping rook can attack a knight at the same time without promising a capture',()=>{
@@ -42,6 +44,7 @@ test('an escaping rook can attack a knight at the same time without promising a 
   const before=cp(0,context.alternative),after=cp(0,context.response),insight=explainMove(context.move,before,after,context);
   assert.equal(insight.grade.severity,0);
   assert.match(insight.alternativeFact,/공격을 피하면서 e5의 나이트를 공격/);
+  assert.match(insight.summary,/다른 후보로는.*공격을 피하면서 e5의 나이트를 공격/);
   const move=new Chess(context.move.before).move('Rc5');
   assert.match(describeHumanMove(move),/공격받던 룩.*피하면서 e5의 나이트를 공격/);
   assert.doesNotMatch(insight.alternativeFact,/잡습니다|이득|강제/);
@@ -75,7 +78,115 @@ test('a non-error grade still explains a fully verified mating alternative condi
   assert.equal(insight.grade.severity,0);
   assert.match(insight.alternativeFact,/e3에서 e6/);
   assert.match(insight.alternativeFact,/예상 수순.*g6.*체크메이트/);
+  assert.match(insight.summary,/대신.*e6.*예상 수순.*g6.*체크메이트/);
   assert.doesNotMatch(insight.alternativeFact,/강제|반드시|메이트.*없어|놓쳤/);
+});
+
+test('a queen offer can prepare a pawn recapture, promotion and capture by the promoted piece',()=>{
+  const context=fixture('6k1/8/8/8/Q2q4/7P/2p2N2/7K b - - 0 20','Qe5',
+    ['Qd1+','Nxd1','cxd1=Q+','Kh2','Qxa4'],['Kg2']);
+  const before=cp(0,context.alternative),after=cp(0,context.response),raw=JSON.stringify({context,before,after});
+  const insight=explainMove(context.move,before,after,context);
+  assert.match(insight.alternativeFact,/상대가 d1의 퀸을 나이트로 잡으면.*c2의 폰으로 되잡으며 퀸으로 승격/);
+  assert.match(insight.alternativeFact,/승격한 퀸으로 a4의 퀸을 잡/);
+  assert.doesNotMatch(insight.alternativeFact,/강제|반드시|무조건/);
+  const line=createInsightLine({...context,before,after,insight},'alternative');
+  assert.equal(line.steps.at(-1).san,'Qxa4');assert.equal(line.cursor,0);assert.equal(line.base.fen(),context.move.before);
+  assert.equal(JSON.stringify({context,before,after}),raw);
+});
+
+test('a truncated or illegal queen acceptance cannot invent its promotion payoff',()=>{
+  const context=fixture('6k1/8/8/8/Q2q4/7P/2p2N2/7K b - - 0 20','Qe5',
+    ['Qd1+','Nxd1','cxd1=Q+','Kh2','Qxa4'],['Kg2']);
+  for(const pv of [context.alternative.slice(0,2),[...context.alternative,'h2h9']]) {
+    const insight=explainMove(context.move,cp(0,pv),cp(0,context.response),context);
+    assert.doesNotMatch(insight.alternativeFact,/승격한 퀸|폰으로 되잡으며.*승격/);
+  }
+});
+
+test('a checking recapture describes a knight for two pawns without claiming material gain',()=>{
+  const context=fixture('6k1/7p/8/8/3qP3/5P2/5n2/4K2R b K - 0 20','Qg7',
+    ['Nxe4','fxe4','Qxe4+','Kd2'],['Kd2']);
+  const before=cp(0,context.alternative),after=cp(0,context.response),insight=explainMove(context.move,before,after,context);
+  assert.match(insight.alternativeFact,/e4의 나이트를 폰으로 잡으면.*퀸으로 그 폰을 되잡아 체크/);
+  assert.match(insight.alternativeFact,/나이트를 내주는 대신 폰 두 개/);
+  assert.doesNotMatch(insight.alternativeFact,/이득|강제|반드시/);
+  assert.match(insight.alternative.focus.note,/흑 1점 손해/);
+  assert.equal(insight.alternative.focus.length,4);
+});
+
+test('a pawn alternative explains defending an attacked pawn while gaining a bishop tempo',()=>{
+  const context=fixture('6k1/8/5n2/8/4P1b1/8/5P2/6K1 w - - 0 20','f4',
+    ['f3','Bh5'],['Bh5']);
+  const insight=explainMove(context.move,cp(0,context.alternative),cp(0,context.response),context);
+  assert.match(insight.alternativeFact,/공격받던 e4의 폰을 지키면서 g4의 비숍을 공격/);
+  assert.match(insight.summary,/다른 후보로는.*e4의 폰을 지키면서 g4의 비숍을 공격/);
+  assert.match(describeHumanMove(new Chess(context.move.before).move('f3')),/e4의 폰을 지키면서/);
+  const pinned=new Chess('5rk1/8/3n4/8/4P1b1/8/5P2/5K2 w - - 0 20').move('f3');
+  assert.doesNotMatch(describeHumanMove(pinned),/e4의 폰을 지키|g4의 비숍을 공격/);
+});
+
+test('a completed minor exchange is described as an exchange instead of a lone bishop loss',()=>{
+  const context=fixture('6k1/7p/8/3p4/4n3/8/6B1/7K w - - 0 20','Bxe4',
+    ['Bh3','h6'],['dxe4']);
+  const before=cp(0,context.alternative),after=cp(-180,context.response),insight=explainMove(context.move,before,after,context);
+  assert.match(insight.responseFact,/백 비숍과 흑 나이트가 교환/);
+  assert.doesNotMatch(insight.summary,/바로 다음 수에.*비숍을 잡/);
+  assert.match(insight.materialFact,/유지/);
+});
+
+test('a later pawn loss is not erased by an earlier equal minor exchange',()=>{
+  const context=fixture('r5k1/7p/8/3p4/4n3/8/P5B1/7K w - - 0 20','Bxe4',
+    ['Bh3','h6'],['dxe4','Kh2','Rxa2+','Kg3']);
+  const insight=explainMove(context.move,cp(0,context.alternative),cp(-180,context.response),context);
+  assert.match(insight.summary,/a2.*폰.*잡|1점 손해/);
+  assert.doesNotMatch(insight.summary,/점수 차이는 유지/);
+});
+
+test('a quiet rook offer describes the immediate reciprocal exchange without claiming the later line is equal',()=>{
+  // An independently constructed position with both rooks and a king recapture.
+  const trade=fixture('8/R7/3R4/7k/6r1/8/8/7K b - - 0 20','Rg1+',
+    ['Rg6','Rxg6','Kxg6','Ra8'],['Kh2']);
+  const insight=explainMove(trade.move,cp(0,trade.alternative),cp(0,trade.response),trade);
+  assert.match(insight.alternativeFact,/g6의 룩을 룩으로 잡으면.*킹으로 되잡아 룩이 하나씩 교환/);
+  assert.doesNotMatch(insight.alternativeFact,/강제|반드시|이득/);
+});
+
+test('the same stationary victim in both examples is not a unique exposure caused by this move',()=>{
+  const context=fixture('6k1/7p/8/8/8/r7/P7/6K1 w - - 0 20','Kh2',
+    ['Kf2','Rxa2+','Kg3'],['Rxa2+','Kg3']);
+  const insight=explainMove(context.move,cp(0,context.alternative),cp(-180,context.response),context);
+  assert.match(insight.summary,/실전 수 뒤와 대안의 예상 수순 모두에서 a2의 백 폰이 잡히는 예시/);
+  assert.doesNotMatch(insight.summary,/지키지 않아|이 수로 인해/);
+  assert.match(insight.materialFact,/백 1점 손해/);
+});
+
+test('a victim that moves in the alternative is not confused with a shared stationary capture',()=>{
+  const context=fixture('6k1/7p/8/8/8/r7/P7/6K1 w - - 0 20','Kh2',
+    ['Kf2','Ra4','a3','Rxa3'],['Rxa2+','Kg3']);
+  const insight=explainMove(context.move,cp(0,context.alternative),cp(-180,context.response),context);
+  assert.doesNotMatch(insight.summary,/실전 수 뒤와 대안.*모두/);
+});
+
+test('a remote example capture stays in expanded risk instead of becoming the current move purpose',()=>{
+  const context=fixture('r5k1/8/8/8/8/8/P7/6K1 w - - 0 20','Kh2',
+    ['Kf2','Kf7','Ke3'],['Kf7','Kh3','Ke6','Kh4','Kd5','Kg4','Rxa2','Kg5']);
+  const insight=explainMove(context.move,cp(0,context.alternative),cp(-180,context.response),context);
+  assert.match(insight.summary,/h2/);assert.doesNotMatch(insight.summary,/7번째|긴 예상/);
+  assert.match(insight.riskFact,/긴 예상 수순.*7번째.*a2/);
+});
+
+test('a refined short mating alternative updates the compact explanation without changing its grade or board',()=>{
+  const context=matingAlternative();
+  context.before=cp(9000,context.alternative.slice(0,1));context.after=cp(9000,context.response);
+  context.insight=explainMove(context.move,context.before,context.after,context);
+  assert.doesNotMatch(context.insight.summary,/체크메이트/);
+  const raw=JSON.stringify({game:context.game,before:context.before,after:context.after}),grade=JSON.stringify(context.insight.grade);
+  const deeper=mate(3,'w',context.alternative,18);deeper.explanationIdentity=insightIdentity(context,'alternative');
+  const updated=refineInsight(context,'alternative',deeper);
+  assert.match(updated.summary,/대신.*e6.*예상 수순.*g6.*체크메이트/);
+  assert.equal(JSON.stringify(updated.grade),grade);assert.equal(JSON.stringify({game:context.game,before:context.before,after:context.after}),raw);
+  assert.equal(createInsightLine({...context,insight:updated},'alternative').base.fen(),context.move.before);
 });
 
 test('a mismatched score, incomplete mate or illegal suffix is not a proven mating alternative',()=>{
@@ -84,6 +195,7 @@ test('a mismatched score, incomplete mate or illegal suffix is not a proven mati
     mate(3,'w',context.alternative.slice(0,-1)),mate(3,'w',[...context.alternative,'h6h7'])]) {
     const insight=explainMove(context.move,before,cp(9000,context.response),context);
     assert.doesNotMatch(insight.alternativeFact,/체크메이트/);
+    assert.doesNotMatch(insight.summary,/체크메이트/);
   }
 });
 

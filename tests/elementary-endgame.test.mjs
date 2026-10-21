@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {Chess,classifyMove,uciMove} from '../src/chess-core.js';
+import {Chess,classifyMove,uciMove,expectedPoints} from '../src/chess-core.js';
 import {elementaryEndgameEvidence} from '../src/endgame-evidence.js';
 
 // Synthetic elementary positions; no account-game FEN or engine dump is used.
@@ -54,9 +54,30 @@ test('an engine mate to CP representation is outcome evidence, not a shortest-ma
   }
 });
 
-test('the losing king retains the same proven outcome for both colors',()=>{
-  for(const black of [false,true]){const x=review({black,fen:SETUP.replace(' w ',' b '),actual:'h8g8',best:'h8h7',rootScore:cp(500),playedScore:cp(1800),bestPv:['h8h7','e1e2'],playedPv:['h8g8','e1e2']});
+test('a proven losing outcome does not erase finite defensive-quality differences, for either color',()=>{
+  for(const black of [false,true]){const x=review({black,fen:SETUP.replace(' w ',' b '),actual:'h8g8',best:'h8h7',rootScore:cp(500),playedScore:cp(700),bestPv:['h8h7','e1e2'],playedPv:['h8g8','e1e2']});
+    const g=grade(x);assert.equal(g.key,'inaccuracy');assert.equal(g.loss,200);
+    assert.equal(g.pointsLoss,expectedPoints(x.before.score,x.move.color)-expectedPoints(x.after.moveReview.score,x.move.color));
+    assert.notEqual(g.endgameEvidence.winner,x.move.color,'the position theorem is still a correct, exposed fact');
+  }
+});
+
+test('the losing king still normalizes a CP-to-mate representation conflict without changing its raw scores',()=>{
+  for(const black of [false,true]){const x=review({black,fen:SETUP.replace(' w ',' b '),actual:'h8g8',best:'h8h7',rootScore:cp(500),playedScore:mate(5),childScore:mate(5),bestPv:['h8h7','e1e2'],playedPv:['h8g8','e1e2']}),raw=JSON.stringify(x);
     const g=grade(x);assert.equal(g.key,'excellent');assert.equal(g.loss,0);assert.equal(g.pointsLoss,0);assert.notEqual(g.endgameEvidence.winner,x.move.color);
+    assert.equal(JSON.stringify(x),raw);
+  }
+});
+
+test('updated finite or mate search representations invalidate the grade cache while preserving the same theorem',()=>{
+  for(const black of [false,true]){
+    const x=review({black,fen:SETUP.replace(' w ',' b '),actual:'h8g8',best:'h8h7',rootScore:cp(500),playedScore:cp(700),bestPv:['h8h7','e1e2'],playedPv:['h8g8','e1e2']});
+    const first=grade(x),proof=first.endgameEvidence;assert.equal(first.key,'inaccuracy');
+    const previous={...x.after.moveReview.score};
+    x.after.moveReview.score=mate(5,black?'b':'w');
+    const changed=grade(x);assert.equal(changed.key,'excellent');assert.equal(changed.pointsLoss,0);assert.equal(changed.endgameEvidence,proof);
+    x.after.moveReview.score=previous;
+    const restored=grade(x);assert.equal(restored.key,'inaccuracy');assert.equal(restored.loss,200);assert.equal(restored.endgameEvidence,proof);
   }
 });
 

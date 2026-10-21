@@ -50,7 +50,7 @@ test('an unfinished exchange is marked uncertain instead of being called a mater
   assert.doesNotMatch(describeMove(move,before,after).text,/잃을 수|9점 손해/);
 });
 
-test('a seven-ply loss is labeled a conditional long-term risk and does not lengthen the core',()=>{
+test('a seven-ply loss stays in expanded conditional risk instead of replacing the current purpose',()=>{
   const chess=new Chess('k6r/8/8/8/4P3/8/P7/1K6 w - - 0 10'),move=chess.move('a3');
   const pv=sanLine(move.after,['Rh7','Kb2','Rh6','Kb1','Rh4','Kb2','Rxe4']);
   const before=cp(0),after=cp(-200,pv),insight=explainMistake(move,before,after);
@@ -58,7 +58,9 @@ test('a seven-ply loss is labeled a conditional long-term risk and does not leng
   assert.equal(insight.response.consequence.distant,true);
   assert.equal(insight.response.focus.length,1);
   assert.match(insight.riskFact,/7번째 이동.*흑 룩이 e4의 백 폰을 잡을 수/);
-  assert.match(describeMove(move,before,after).text,/이후 선택에 따라 달라질/);
+  assert.match(insight.riskFact,/이후 선택에 따라 달라질/);
+  assert.match(describeMove(move,before,after).text,/a2에서 a3/);
+  assert.doesNotMatch(describeMove(move,before,after).text,/7번째|긴 예상/);
   assert.doesNotMatch(describeMove(move,before,after).text,/이 수로 인해/);
 });
 
