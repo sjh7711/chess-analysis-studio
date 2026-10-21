@@ -851,7 +851,10 @@ function canSupport(chess,from,target,color) {
   const probe=new Chess(chess.fen()),enemy=color==='w'?'b':'w';
   // Treat the occupied friendly square as the destination of a possible
   // exchange, then verify that the new defender would be free to recapture.
-  probe.remove(target);probe.put({type:'p',color:enemy},target);
+  // A knight is a valid placeholder on every rank; a pawn on ranks 1 or 8
+  // would make the probe's FEN invalid. Its type cannot change this capture's
+  // legality: the placeholder is removed before checking the defender's king.
+  probe.remove(target);probe.put({type:'n',color:enemy},target);
   return legalCaptures(probe,color).some(move=>move.from===from && move.to===target);
 }
 
