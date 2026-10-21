@@ -6,7 +6,7 @@ import { engineChunks } from '../src/engine-options.js';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const site = path.join(root, 'sites', 'chess-analysis');
 const dist = path.join(site, 'public');
-const modules = ['annotations', 'app', 'bootstrap', 'capture-proof', 'chess-core', 'coach-arrows', 'completion-alerts', 'endgame-evidence', 'engine', 'engine-options', 'explanation-search', 'explanation-playback', 'game-review', 'human-recommendation', 'insight', 'move-sounds', 'notification-center', 'opening-book', 'online-nav', 'pieces', 'piece-themes', 'piece-settings', 'positional-purpose', 'review', 'review-pool', 'sample', 'study', 'tactical-patterns', 'theme'];
+const modules = ['annotations', 'app', 'background-review', 'exploration-chart', 'bootstrap', 'capture-proof', 'chess-core', 'coach-arrows', 'completion-alerts', 'endgame-evidence', 'engine', 'engine-options', 'explanation-search', 'explanation-playback', 'game-review', 'human-recommendation', 'insight', 'move-sounds', 'notification-center', 'opening-book', 'online-nav', 'pieces', 'piece-themes', 'piece-settings', 'positional-purpose', 'review', 'review-pool', 'sample', 'study', 'tactical-patterns', 'theme'];
 const files = [
   ['index.html', 'index.html'],
   ['styles.css', 'styles.css'],
