@@ -209,7 +209,7 @@ async function analyzeCurrent(force = false) {
   const cursor = line?.cursor;
   // Original-game foreground searches use the same policy as the active review
   // so a priority result cannot replace its root with a different candidate set.
-  const full=!line&&currentGameReview();
+  const full=line?null:currentGameReview();
   const options = full?.options || searchOptions(Number($('depth').value),performanceOptions);
   const comparisonOptions=full?.comparisonOptions || options;
   const overviewOptions=full?.options || reviewOptions(Number($('depth').value),performanceOptions);
@@ -222,7 +222,7 @@ async function analyzeCurrent(force = false) {
   try {
     const output=await foregroundLease(run,(worker,signal)=>analyzeForeground(worker,{
       chess,parent,before:results.get(position-1),cached:results.get(position),move,options,comparisonOptions,overviewOptions,overview:!!full?.overview,
-      configKey:key,force,isCached:full?.spec.isCached||isCached,signal,
+      configKey:key,force,isCached:full?.isCached||isCached,signal,
     }),full?{engineId:REVIEW_ENGINE_ID,hash:full.hash}:undefined);
     if (run !== generation) return;
     if(move&&output.before&&(line||!isCached(results.get(position-1))))results.set(position-1,output.before);
