@@ -4,6 +4,7 @@ import { ENGINES, DEFAULT_ENGINE_ID, REVIEW_ENGINE_ID, AUTO_THREAD_LABEL, availa
 import { BackgroundReview } from './background-review.js';
 import { ReviewWorkerPool } from './review-pool.js';
 import { analyzeForeground } from './foreground-analysis.js';
+import { isPositionResultCached } from './analysis-cache.js';
 import { explorationChart, seedExplorationBase } from './exploration-chart.js';
 import { pieceSvg, pieceSnapshot, pieceTransitions, StepNavigation, capturedPieces, capturedMarkup } from './pieces.js';
 import { BoardAnnotations } from './annotations.js';
@@ -197,10 +198,15 @@ async function analyzeCurrent(force = false) {
   if (state.editor) return;
   if (state.line?.explanationSnapshot && !force) { schedulePlayback(); return; }
   if (force && state.line) state.line.explanationSnapshot=false;
+  const positionKey=configKey();
+  // Inherited game scores may be displayed while waiting, but a branch must
+  // grade its parent and child with the same position policy at every worker count.
+  const cacheMatches=state.line ? result=>isPositionResultCached(result,positionKey) : isCached;
   const cached=currentResult(),position=state.line?.cursor??state.index,results=state.line?state.line.results:state.results;
   const move=state.line?state.line.steps[position-1]:state.game.moves[position-1],before=results.get(position-1);
-  const needsReview=move && isCached(before) && !hasMoveReview(before,cached,move);
-  if (!force && isCached(cached) && !needsReview) { renderAnalysis(); schedulePlayback(); return; }
+  const needsReview=move && (state.line ? !cacheMatches(before)||!hasMoveReview(before,cached,move)
+    : cacheMatches(before)&&!hasMoveReview(before,cached,move));
+  if (!force && cacheMatches(cached) && !needsReview) { renderAnalysis(); schedulePlayback(); return; }
   stopJob();
   const run = generation;
   const chess = currentChess();
@@ -222,7 +228,7 @@ async function analyzeCurrent(force = false) {
   try {
     const output=await foregroundLease(run,(worker,signal)=>analyzeForeground(worker,{
       chess,parent,before:results.get(position-1),cached:results.get(position),move,options,comparisonOptions,overviewOptions,overview:!!full?.overview,
-      configKey:key,force,isCached:full?.isCached||isCached,signal,
+      configKey:key,force,isCached:full?.isCached||cacheMatches,signal,
     }),full?{engineId:REVIEW_ENGINE_ID,hash:full.hash}:undefined);
     if (run !== generation) return;
     if(move&&output.before&&(line||!isCached(results.get(position-1))))results.set(position-1,output.before);
