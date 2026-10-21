@@ -126,6 +126,36 @@ export class AnalysisLine {
   }
 }
 
+// Keep the last study scene separate from the original game's selected move.
+// Scenes belong to a game object, so an import can never revive another game.
+export class StudySceneStore {
+  #scene = null;
+  save(game,line,{insightContext=null,coachExpanded=null}={}) {
+    if (!line) return false;
+    this.#scene={game,line,insightContext,coachExpanded};
+    return true;
+  }
+  peek(game) { return this.#scene?.game===game ? this.#scene : null; }
+  take(game) {
+    const scene=this.peek(game);
+    this.discard();
+    return scene;
+  }
+  discard() { this.#scene=null; }
+  invalidate() {
+    if (!this.#scene) return false;
+    const {line}=this.#scene;
+    line.results.clear();
+    if (line.explanationSnapshot || line.kind==='pv') {
+      for (const key of ['explanationSnapshot','title','reviewKind','reviewScope','reviewIndex','fullLength','sourceDepth','sourceScore','startLabel','focusNote','refinementStatus','pendingRefinement','explanationRequest','conditional','bestResponse']) delete line[key];
+      line.kind='manual';
+    }
+    this.#scene.insightContext=null;
+    this.#scene.coachExpanded=null;
+    return true;
+  }
+}
+
 export function boardToFen(board, turn) {
   if (!['w','b'].includes(turn)) throw new Error('차례를 선택하세요.');
   const ranks = [];

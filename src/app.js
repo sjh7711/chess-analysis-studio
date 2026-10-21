@@ -9,8 +9,9 @@ import { chartView, seedExplorationBase } from './exploration-chart.js';
 import { pieceSvg, pieceSnapshot, pieceTransitions, StepNavigation, capturedPieces, capturedMarkup } from './pieces.js';
 import { BoardAnnotations } from './annotations.js';
 import { SAMPLE_PGN } from './sample.js';
-import { AnalysisLine, PlaybackClock, PIECE_NAMES, cloneChess, editedPosition, materialBalance, exportLine, restoreResults, moveText } from './study.js';
+import { AnalysisLine, StudySceneStore, PlaybackClock, PIECE_NAMES, cloneChess, editedPosition, materialBalance, exportLine, restoreResults, moveText } from './study.js';
 import { createInsightLine, describeMove, explainMove, refineInsight, moveLabel, moveTurn } from './insight.js';
+import { StableActionMarkup } from './insight-actions.js';
 import { humanRecommendation } from './human-recommendation.js';
 import { explanationArrows } from './coach-arrows.js';
 import { ExplanationSearch, explanationOptions } from './explanation-search.js';
@@ -23,8 +24,13 @@ const moveSounds=new MoveSounds({button:$('move-sound')});
 const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
 const STORAGE = 'chessreview.v1';
 const LIBRARY = 'chessreview.library.v1';
-let removedGame = null, exportFilename = 'chess-review.pgn', insightContext = null, insightMarkup = '';
+let removedGame = null, exportFilename = 'chess-review.pgn', insightContext = null;
 let coachCache=null, coachExpanded=null;
+const studyScenes=new StudySceneStore();
+const insightActions=new StableActionMarkup({render(markup){
+  $('insight-content').innerHTML=markup;
+  $('insight-content').scrollTop=0;
+}});
 let humanChoiceCache=null;
 const explanationSearch=new ExplanationSearch();
 let moveListScroll=0, restoreMoveListScroll=false;
@@ -64,6 +70,7 @@ const backgroundReview=new BackgroundReview({
     completionAlerts.cancel(job.id);
     if(!ownsReview(job))return;
     seedExplorationBase(state.game,state.line,state.results);
+    seedExplorationBase(state.game,studyScenes.peek(state.game)?.line,state.results);
     renderResults();persist();
   },
 });
@@ -104,6 +111,19 @@ function toast(message, error = false) {
   toastTimer = setTimeout(() => { $('toast').hidden = true; }, 4200);
 }
 function currentChess() { return state.line ? state.line.position() : gameAt(state.game, state.index); }
+function suspendStudy() {
+  if(!state.line)return false;
+  studyScenes.save(state.game,state.line,{insightContext,coachExpanded});
+  state.line=null;insightContext=null;coachExpanded=null;
+  return true;
+}
+function restoreStudy() {
+  const scene=studyScenes.take(state.game);
+  if(!scene)return false;
+  state.line=scene.line;insightContext=scene.insightContext;coachExpanded=scene.coachExpanded;
+  seedExplorationBase(state.game,state.line,state.results);
+  return true;
+}
 function evaluationColor() { return state.flipped ? 'b' : 'w'; }
 function evaluationSide() { return state.flipped ? '흑' : '백'; }
 function displayScore(score) { return formatScore(score, evaluationColor()); }
@@ -251,6 +271,7 @@ async function analyzeGame(restart = false) {
   stopJob();
   if(selectedEngine!==REVIEW_ENGINE_ID) {
     selectedEngine=REVIEW_ENGINE_ID;
+    studyScenes.invalidate();
     state.results.clear();insightContext=null;coachCache=null;coachExpanded=null;
   }
   if (restart) { state.results.clear(); persist(); }
@@ -552,10 +573,7 @@ function renderInsight() {
 }
 
 function setInsightContent(markup) {
-  if (markup === insightMarkup) return;
-  insightMarkup = markup;
-  $('insight-content').innerHTML = markup;
-  $('insight-content').scrollTop = 0;
+  insightActions.update(markup);
 }
 
 function renderInsightDetail({game,index,insight,before,after}) {
@@ -589,17 +607,23 @@ function startInsight(kind,scope='core') {
   const updated=cached && refineInsight(insightContext,kind,cached);
   const context=updated?{...insightContext,insight:updated}:insightContext;
   const line = createInsightLine(context,kind,scope);
-  if (!line) return;
+  if (!line) {toast('저장된 예상 수순을 열 수 없습니다. 현재 국면을 다시 분석해 주세요.',true);return;}
   line.explanationSnapshot=true;
+  line.explanationRequest={kind,options,engineKey};
   line.refinementStatus=cached?(updated?`심층 확인 완료 · 깊이 ${cached.depth}${cached.goalReached?'':' · 시간 내 도달 깊이'}`:'시간 내 추가 깊이에 도달하지 못해 기존 설명을 유지합니다'):'';
   line.seek(1);
   pausePlayback(); stopJob();
   coachExpanded=null;
   insightContext=context;
+  studyScenes.discard();
   state.line = line; state.selected = null; state.tab = 'study';
   state.error=null;
   renderAll();
   if (!cached) void deepenExplanation(context,kind,options,engineKey,line);
+  document.querySelector('.workspace').scrollIntoView({block:'start',behavior:'instant'});
+  $('study-play').focus({preventScroll:true});
+  const label=kind==='response'?'상대 응수':kind==='alternative'?'대안':'희생 수락 예시';
+  toast(`${label} ${scope==='full'?'전체':'핵심'} 수순 ${line.steps.length}번 이동을 열었습니다. 재생 버튼으로 이어서 볼 수 있습니다.`);
 }
 
 async function deepenExplanation(context,kind,options,engineKey,line) {
@@ -610,14 +634,7 @@ async function deepenExplanation(context,kind,options,engineKey,line) {
   try {
     const result=await foregroundLease(run,(worker)=>explanationSearch.refine(worker,context,kind,options,engineKey));
     if (run!==generation || state.line!==line || state.game!==context.game) return;
-    const insight=refineInsight(context,kind,result);
-    if (insight) {
-      const updated={...context,insight},replacement=createInsightLine(updated,kind,line.reviewScope||'core');
-      if(replacement) {
-        line.pendingRefinement={context:updated,replacement,result};
-        if(!applyExplanationRefinement(line))line.refinementStatus=`심층 분석 완료 · 깊이 ${result.depth} · 현재 장면 유지`;
-      } else line.refinementStatus='추가 근거가 충분하지 않아 기존 설명을 유지합니다';
-    } else line.refinementStatus='추가 근거가 충분하지 않아 기존 설명을 유지합니다';
+    stageExplanationRefinement(context,kind,result,line);
   } catch(error) {
     if (run===generation && error.name!=='AbortError' && state.line===line) line.refinementStatus='심층 확인을 마치지 못해 기존 설명을 유지합니다';
   } finally {
@@ -626,6 +643,15 @@ async function deepenExplanation(context,kind,options,engineKey,line) {
       renderAll();schedulePlayback();
     }
   }
+}
+
+function stageExplanationRefinement(context,kind,result,line) {
+  const insight=refineInsight(context,kind,result);
+  const updated=insight&&{...context,insight};
+  const replacement=updated&&createInsightLine(updated,kind,line.reviewScope||'core');
+  if(!replacement){line.refinementStatus='추가 근거가 충분하지 않아 기존 설명을 유지합니다';return;}
+  line.pendingRefinement={context:updated,replacement,result};
+  if(!applyExplanationRefinement(line))line.refinementStatus=`심층 분석 완료 · 깊이 ${result.depth} · 현재 장면 유지`;
 }
 
 function applyExplanationRefinement(line) {
@@ -766,11 +792,12 @@ function navigate(index,{analyze=true}={}) {
   coachExpanded=null;
   const previous=state.line?null:state.index;
   pausePlayback();
+  stopJob();
+  suspendStudy();
   state.index = Math.max(0,Math.min(state.game.moves.length,index));
   state.line = null; state.editor = null; state.selected = null;
   if (state.tab === 'study') state.tab = 'moves';
   $('editor-panel').hidden = true;
-  stopJob();
   renderAll(); renderMoves(true); persist(); if(analyze)scheduleAnalysis();
   if(previous!==null&&Math.abs(state.index-previous)===1)void moveSounds.play(state.index>previous?state.game.moves[state.index-1]:{});
 }
@@ -778,13 +805,20 @@ function navigate(index,{analyze=true}={}) {
 function startExploration() {
   if (state.editor) return;
   pausePlayback(); stopJob();
-  if (!state.line) {
+  if (!state.line && !restoreStudy()) {
     state.line = new AnalysisLine(currentChess(), [], currentResult());
     state.line.kind = 'manual';
   }
   state.selected = null;
   state.tab = 'study';
-  renderAll(); scheduleAnalysis();
+  renderAll();
+  if(state.line.explanationSnapshot&&state.line.explanationRequest&&insightContext){
+    const {kind,options,engineKey}=state.line.explanationRequest;
+    const cached=explanationSearch.get(insightContext,kind,options,engineKey);
+    if(state.line.pendingRefinement){applyExplanationRefinement(state.line);renderAll();}
+    else if(cached){stageExplanationRefinement(insightContext,kind,cached,state.line);renderAll();}
+    else void deepenExplanation(insightContext,kind,options,engineKey,state.line);
+  }else scheduleAnalysis();
 }
 
 function seekLine(index, keepPlaying = false,{analyze=true}={}) {
@@ -827,6 +861,7 @@ function playMove(uci) {
   try {
     const line = state.line || new AnalysisLine(currentChess(),[],currentResult());
     const move=line.play(uci);
+    studyScenes.discard();
     line.kind = 'manual';
     for(const key of ['title','reviewKind','reviewScope','fullLength','focusNote','explanationSnapshot','refinementStatus','pendingRefinement'])delete line[key];
     state.line = line; state.selected = null; state.error = null; state.tab = 'study';
@@ -964,7 +999,9 @@ function startEditor() {
   if (state.editor) return;
   pausePlayback(); stopJob(); state.selected=null;
   const chess=currentChess();
-  state.editor={board:new Map(pieceSnapshot(chess).pieces.map(piece=>[piece.square,piece])),turn:chess.turn(),tool:'move'};
+  const returnToStudy=!!state.line;
+  suspendStudy();
+  state.editor={board:new Map(pieceSnapshot(chess).pieces.map(piece=>[piece.square,piece])),turn:chess.turn(),tool:'move',returnToStudy};
   $('editor-turn').value=state.editor.turn;
   $('editor-error').hidden=true;
   renderEditorTools(); renderAll();
@@ -1007,6 +1044,7 @@ function squareClicked(square) {
 }
 
 function setGame(game, saved = null) {
+  studyScenes.discard();
   pausePlayback(); stopGameReview(); stopJob(); state.game = game; state.index = game.moves.length; state.results = new Map(); state.line = null; state.editor = null; state.selected = null; state.error = null;
   selectedEngine=REVIEW_ENGINE_ID;
   if(saved){
@@ -1027,6 +1065,11 @@ $('board').addEventListener('click', event => { if(Date.now()<suppressClickUntil
 $('move-list').addEventListener('click', event => { const button = event.target.closest('[data-index]'); if (button) navigate(Number(button.dataset.index)); });
 $('move-list').addEventListener('scroll',rememberMoveListScroll,{passive:true});
 $('review-content').addEventListener('click', event => { const button = event.target.closest('[data-review-index]'); if (button) navigate(Number(button.dataset.reviewIndex)); });
+$('insight-content').addEventListener('pointerdown',event=>{if(event.button===0&&event.target.closest('[data-insight-play]'))insightActions.hold(event.pointerId);});
+window.addEventListener('pointerup',event=>insightActions.release(event.pointerId),true);
+window.addEventListener('pointercancel',event=>insightActions.cancelHold(event.pointerId),true);
+window.addEventListener('blur',()=>insightActions.cancelHold());
+window.addEventListener('pagehide',()=>insightActions.cancelHold());
 $('insight-content').addEventListener('click',event=>{const button=event.target.closest('[data-insight-play]');if(button)startInsight(button.dataset.insightPlay,button.dataset.insightScope);});
 $('coach-explain').onclick=openCoachExplanation;
 $('coach-prev').onclick=()=>{if(state.line)seekLine(state.line.cursor-1);};
@@ -1048,7 +1091,7 @@ $('analyze-game').onclick = () => {
   analyzeGame(restart);
 };
 $('restart-game').onclick = () => analyzeGame(true);
-$('depth').onchange = () => { pausePlayback(); stopGameReview(); stopJob(); leaveExplanationSnapshot(); state.results.clear(); state.line?.results.clear(); insightContext=null; renderAll(); persist(); scheduleAnalysis(!state.line); };
+$('depth').onchange = () => { pausePlayback(); stopGameReview(); stopJob(); leaveExplanationSnapshot(); studyScenes.invalidate(); state.results.clear(); state.line?.results.clear(); insightContext=null; renderAll(); persist(); scheduleAnalysis(!state.line); };
 $('engine-settings-open').onclick = () => {
   $('engine-choice').value = selectedEngine;
   $('settings-depth').value = $('depth').value;
@@ -1091,7 +1134,7 @@ $('engine-settings-form').onsubmit = event => {
   selectedEngine=nextEngine;performanceOptions=nextPerformance;$('depth').value=nextDepth;
   if(analysisPool)analysisPool.setConcurrency(nextPerformance.threads);
   if(currentGameReview())currentGameReview().concurrency=nextPerformance.threads;
-  if(changed){state.results.clear();state.line?.results.clear();}
+  if(changed){state.results.clear();state.line?.results.clear();studyScenes.invalidate();}
   state.error=null;
   if(!schedulingOnly&&!explanationOnly)insightContext=null;
   renderAll();persist();
@@ -1114,6 +1157,7 @@ function chartNavigate(index,options) {
         state.index=chartDrag.originalIndex;
         insightContext=chartDrag.insightContext;coachExpanded=chartDrag.coachExpanded;
       }
+      if(studyScenes.peek(state.game)?.line===branch)studyScenes.discard();
       state.line=branch;seekLine(index-origin,false,options);
     }
   }else navigate(index,options);
@@ -1160,10 +1204,16 @@ $('eval-chart').addEventListener('keydown',event=>{ if(!['ArrowLeft','ArrowRight
 $('edit-start').onclick=startEditor;
 $('editor-turn').onchange=()=>{if(state.editor){state.editor.turn=$('editor-turn').value;renderBoard();}};
 for(const id of ['editor-tools','editor-palette']) $(id).addEventListener('click',event=>{const tool=event.target.closest('[data-editor-tool]');if(tool&&state.editor){state.editor.tool=tool.dataset.editorTool;state.selected=null;renderEditorTools();renderBoard();}});
-$('editor-cancel').onclick=()=>{state.editor=null;state.selected=null;renderAll();scheduleAnalysis();};
+$('editor-cancel').onclick=()=>{
+  const returnToStudy=state.editor?.returnToStudy;
+  state.editor=null;state.selected=null;
+  if(returnToStudy){startExploration();return;}
+  renderAll();scheduleAnalysis();
+};
 $('editor-apply').onclick=()=>{
   try {
     const chess=editedPosition(state.editor.board,state.editor.turn);
+    studyScenes.discard();
     state.line=new AnalysisLine(chess); state.line.kind='edited'; state.editor=null; state.selected=null; state.tab='study';
     renderAll(); scheduleAnalysis();
   }catch(error){$('editor-error').textContent=error.message;$('editor-error').hidden=false;}
@@ -1205,9 +1255,13 @@ $('board').addEventListener('dragend',()=>{draggedSquare=null;renderBoard();});
 
 for (const tab of ['moves','study','review']) $(`${tab}-tab`).onclick = () => {
   if (tab === 'study' && !state.line) { startExploration(); return; }
-  pausePlayback(); state.tab = tab; renderStudy(); renderChart();
+  pausePlayback();
+  let restoredOriginal=false;
+  if(tab!=='study'&&state.line){stopJob();restoredOriginal=suspendStudy();}
+  state.selected=null;state.tab = tab; renderAll();
   if (tab === 'moves') renderMoves();
   if (tab === 'study') revealStudyMove();
+  if(restoredOriginal)scheduleAnalysis();
 };
 $('import-open').onclick = () => { pausePlayback();renderStudy(); $('import-error').hidden = true; $('import-dialog').showModal(); };
 $('import-close').onclick = () => $('import-dialog').close();
