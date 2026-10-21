@@ -31,9 +31,21 @@ export function explorationChart(game, line, gameResults) {
     }
   }
   for (let index = 0; index <= line.steps.length; index++) {
+    // Keep the original graph through the anchor. A separate branch-root
+    // search can have a different score, but remains independent for grading.
+    if (index === 0 && matched >= 0 && results.has(originIndex)) continue;
     const result = line.results.get(index);
     if (hasScore(result)) results.set(originIndex + index, result);
   }
   return { results, cursor: originIndex + line.cursor,
     count: originIndex + line.steps.length + 1, originIndex };
+}
+
+// The selected panel owns the displayed timeline; retaining a branch while
+// reading the original notation must not switch the graph back on completion.
+export function chartView(game, line, gameResults, { tab = 'moves', index = 0 } = {}) {
+  const branch = tab === 'study' && line ? line : null;
+  if (branch) return { branch, ...explorationChart(game, branch, gameResults) };
+  return { branch: null, results: gameResults, cursor: index,
+    count: game.positions.length, originIndex: 0 };
 }

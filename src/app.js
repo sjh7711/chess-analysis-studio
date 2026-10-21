@@ -5,7 +5,7 @@ import { BackgroundReview } from './background-review.js';
 import { ReviewWorkerPool } from './review-pool.js';
 import { analyzeForeground } from './foreground-analysis.js';
 import { isPositionResultCached } from './analysis-cache.js';
-import { explorationChart, seedExplorationBase } from './exploration-chart.js';
+import { chartView, seedExplorationBase } from './exploration-chart.js';
 import { pieceSvg, pieceSnapshot, pieceTransitions, StepNavigation, capturedPieces, capturedMarkup } from './pieces.js';
 import { BoardAnnotations } from './annotations.js';
 import { SAMPLE_PGN } from './sample.js';
@@ -35,7 +35,7 @@ const settings = { 12: true, 16: true, 20: true, 24: true };
 const logicalCores=Math.max(1,Math.floor(Number(navigator.hardwareConcurrency)||1));
 const maxThreads = availableReviewWorkers(logicalCores).at(-1);
 let selectedEngine = DEFAULT_ENGINE_ID, performanceOptions = normalizePerformance({}, maxThreads,logicalCores);
-const state = { game:parseGame(SAMPLE_PGN), index:59, flipped:false, results:new Map(), line:null, editor:null, playing:false, selected:null, mode:null, error:null, tab:'moves', chartMode:'game' };
+const state = { game:parseGame(SAMPLE_PGN), index:59, flipped:false, results:new Map(), line:null, editor:null, playing:false, selected:null, mode:null, error:null, tab:'moves' };
 const annotations=new BoardAnnotations($('board'),{isFlipped:()=>state.flipped,enabled:()=>!state.editor,toggleButton:$('annotation-mode'),clearButton:$('annotation-clear')});
 let analysisPool=null,foregroundAbort=null,generation = 0, debounce, toastTimer, pendingPromotion, draggedSquare, suppressClickUntil = 0;
 const backgroundReview=new BackgroundReview({
@@ -598,7 +598,6 @@ function startInsight(kind,scope='core') {
   insightContext=context;
   state.line = line; state.selected = null; state.tab = 'study';
   state.error=null;
-  state.chartMode = 'line';
   renderAll();
   if (!cached) void deepenExplanation(context,kind,options,engineKey,line);
 }
@@ -649,7 +648,7 @@ function closeCoachExplanation() {
 function leaveExplanationSnapshot() {
   if(!state.line?.explanationSnapshot)return;
   state.index=state.line.reviewIndex;
-  state.line=null;state.selected=null;state.tab='moves';state.chartMode='game';
+  state.line=null;state.selected=null;state.tab='moves';
   coachExpanded=null;insightContext=null;
 }
 
@@ -668,18 +667,20 @@ function openCoachExplanation() {
   else {coachExpanded=insightContext;renderCoach();}
 }
 
+function currentChart() {
+  // A scrub keeps its original route and scale until release, even when its
+  // cursor crosses from the branch into the recorded history and back again.
+  const dragging=chartDrag?.branch;
+  const view=chartView(state.game,dragging||state.line,state.results,
+    {tab:dragging?'study':state.editor?'moves':state.tab,index:state.index});
+  if(dragging&&state.line!==dragging)view.cursor=state.index;
+  return view;
+}
+
 function renderChart() {
-  $('chart-line').disabled = !state.line;
-  $('chart-line').textContent = state.line?.conditional?'희생 수락 예시':'탐색 수순';
-  if (!state.line) state.chartMode = 'game';
-  for (const mode of ['game','line']) $('chart-'+mode).setAttribute('aria-pressed',String(state.chartMode === mode));
-  const branch = state.chartMode === 'line' && state.line;
-  const series=branch?explorationChart(state.game,branch,state.results):null;
-  const results = series ? series.results : state.results;
-  const cursor = series ? series.cursor : state.index;
-  const count = series ? series.count : state.game.positions.length;
-  $('chart-start').textContent = branch ? series.originIndex>0?'원본 → 탐색':'탐색 시작' : '시작';
-  $('chart-last').textContent = branch ? `${branch.steps.length}번 이동` : state.game.moves.length ? `${state.game.moves.length}번 이동` : '현재 국면';
+  const {branch,results,cursor,count}=currentChart();
+  $('chart-start').textContent = '시작';
+  $('chart-last').textContent = count>1 ? `${count-1}번 이동` : '현재 국면';
   $('chart-status').textContent = branch?.explanationSnapshot ? `설명 수순 · 근거 깊이 ${branch.sourceDepth}`
     : `${evaluationSide()} 기준 · ${state.editor ? '배치 편집 중' : currentGameReview() ? branch ? '자유 탐색 우선 · 원본 기보 분석도 계속' : '전체 대국 분석 중' : results.size===count ? '분석 완료' : `${results.size}/${count} 국면 분석`}`;
   $('chart-status').title = evaluationHint();
@@ -692,7 +693,7 @@ function renderChart() {
   $('chart-current-score').title = evaluationHint();
   $('eval-chart').setAttribute('aria-valuemax',String(count-1));
   $('eval-chart').setAttribute('aria-valuenow',String(cursor));
-  $('eval-chart').setAttribute('aria-valuetext',`${branch?'탐색 수순':'원본 대국'} · ${cursor} / ${count-1}번 이동`);
+  $('eval-chart').setAttribute('aria-valuetext',`${cursor} / ${count-1}번 이동`);
   const x = index => count === 1 ? 300 : index/(count-1)*600;
   const y = score => 64-Math.tanh(displayValue(score)/420)*55;
   let svg = '<line x1="0" y1="64" x2="600" y2="64" stroke="#c6d1bc" stroke-width="1" stroke-dasharray="4 4"/>';
@@ -769,7 +770,6 @@ function navigate(index,{analyze=true}={}) {
   state.line = null; state.editor = null; state.selected = null;
   if (state.tab === 'study') state.tab = 'moves';
   $('editor-panel').hidden = true;
-  state.chartMode = 'game';
   stopJob();
   renderAll(); renderMoves(true); persist(); if(analyze)scheduleAnalysis();
   if(previous!==null&&Math.abs(state.index-previous)===1)void moveSounds.play(state.index>previous?state.game.moves[state.index-1]:{});
@@ -784,7 +784,6 @@ function startExploration() {
   }
   state.selected = null;
   state.tab = 'study';
-  state.chartMode = 'line';
   renderAll(); scheduleAnalysis();
 }
 
@@ -831,7 +830,6 @@ function playMove(uci) {
     line.kind = 'manual';
     for(const key of ['title','reviewKind','reviewScope','fullLength','focusNote','explanationSnapshot','refinementStatus','pendingRefinement'])delete line[key];
     state.line = line; state.selected = null; state.error = null; state.tab = 'study';
-    state.chartMode = 'line';
     renderAll(); scheduleAnalysis();
     void moveSounds.play(move);
   } catch { renderStudy(); toast('둘 수 없는 수입니다. 표시된 이동 칸을 선택하세요.',true); }
@@ -1020,7 +1018,7 @@ function setGame(game, saved = null) {
     for(const [index,result] of state.results)if(!isCached(result))state.results.delete(index);
   }
   $('move-filter').value='0';$('move-side').value='all';
-  state.chartMode='game'; $('editor-panel').hidden=true;
+  $('editor-panel').hidden=true;
   moveListScroll=0;restoreMoveListScroll=false;$('move-list').scrollTop=0;
   renderGame(); renderMoves(true); persist(); scheduleAnalysis(true);
 }
@@ -1087,7 +1085,7 @@ $('engine-settings-form').onsubmit = event => {
     // Applying settings analyzes the displayed scene, including a bulb step.
     // Detach its frozen explanation without navigating back to the game move.
     state.line=new AnalysisLine(currentChess());
-    state.line.kind='manual';state.selected=null;state.tab='study';state.chartMode='line';
+    state.line.kind='manual';state.selected=null;state.tab='study';
     coachExpanded=null;
   }
   selectedEngine=nextEngine;performanceOptions=nextPerformance;$('depth').value=nextDepth;
@@ -1107,28 +1105,34 @@ $('engine-settings-form').onsubmit = event => {
 };
 function chartNavigate(index,options) {
   if(state.editor)return;
-  if(state.chartMode==='line'&&state.line){
-    const origin=explorationChart(state.game,state.line,state.results).originIndex;
+  const {branch,originIndex:origin,count}=currentChart();
+  index=Math.max(0,Math.min(count-1,index));
+  if(branch){
     if(index<origin)navigate(index,options);
-    else seekLine(index-origin,false,options);
+    else {
+      if(state.line!==branch&&chartDrag){
+        state.index=chartDrag.originalIndex;
+        insightContext=chartDrag.insightContext;coachExpanded=chartDrag.coachExpanded;
+      }
+      state.line=branch;seekLine(index-origin,false,options);
+    }
   }else navigate(index,options);
 }
-for(const mode of ['game','line']) $('chart-'+mode).onclick=()=>{if(mode==='line'&&!state.line)return;state.chartMode=mode;renderChart();};
 let chartDrag=null, chartDragFrame=0;
 function scrubChart(clientX) {
   const box=$('eval-chart').getBoundingClientRect();
   if(!box.width)return;
-  const branch=state.chartMode==='line' && state.line;
-  const series=branch?explorationChart(state.game,branch,state.results):null;
-  const length=series?series.count-1:state.game.moves.length;
+  const series=currentChart();
+  const length=series.count-1;
   const index=Math.max(0,Math.min(length,Math.round((clientX-box.left)/box.width*length)));
-  if(index!==(series?series.cursor:state.index))chartNavigate(index,{analyze:false});
+  if(index!==series.cursor)chartNavigate(index,{analyze:false});
 }
 $('eval-chart').addEventListener('pointerdown',event=>{
   if(event.button!==0 || !event.isPrimary || state.editor || chartDrag)return;
   event.preventDefault();
   pausePlayback();stopJob();
-  chartDrag={pointerId:event.pointerId,clientX:event.clientX};
+  chartDrag={pointerId:event.pointerId,clientX:event.clientX,branch:currentChart().branch,
+    originalIndex:state.index,insightContext,coachExpanded};
   $('eval-chart').setPointerCapture(event.pointerId);
   $('eval-chart').classList.add('scrubbing');
   $('eval-chart').focus({preventScroll:true});
@@ -1146,12 +1150,13 @@ function finishChartDrag(event) {
   cancelAnimationFrame(chartDragFrame);chartDragFrame=0;
   if(event.type==='pointerup')scrubChart(event.clientX);
   chartDrag=null;
+  renderChart();
   $('eval-chart').classList.remove('scrubbing');
   if($('eval-chart').hasPointerCapture(event.pointerId))$('eval-chart').releasePointerCapture(event.pointerId);
   scheduleAnalysis();
 }
 for(const type of ['pointerup','pointercancel','lostpointercapture'])$('eval-chart').addEventListener(type,finishChartDrag);
-$('eval-chart').addEventListener('keydown',event=>{ if(!['ArrowLeft','ArrowRight','Home','End'].includes(event.key))return; event.preventDefault();event.stopPropagation();const branch=state.chartMode==='line'&&state.line;const length=branch?explorationChart(state.game,branch,state.results).count-1:state.game.moves.length;if(event.key==='Home'||event.key==='End')chartNavigate(event.key==='Home'?0:length);else stepBoard(event.key==='ArrowLeft'?-1:1,branch); });
+$('eval-chart').addEventListener('keydown',event=>{ if(!['ArrowLeft','ArrowRight','Home','End'].includes(event.key))return; event.preventDefault();event.stopPropagation();const {cursor,count}=currentChart();chartNavigate(event.key==='Home'?0:event.key==='End'?count-1:cursor+(event.key==='ArrowLeft'?-1:1)); });
 $('edit-start').onclick=startEditor;
 $('editor-turn').onchange=()=>{if(state.editor){state.editor.turn=$('editor-turn').value;renderBoard();}};
 for(const id of ['editor-tools','editor-palette']) $(id).addEventListener('click',event=>{const tool=event.target.closest('[data-editor-tool]');if(tool&&state.editor){state.editor.tool=tool.dataset.editorTool;state.selected=null;renderEditorTools();renderBoard();}});
@@ -1160,7 +1165,7 @@ $('editor-apply').onclick=()=>{
   try {
     const chess=editedPosition(state.editor.board,state.editor.turn);
     state.line=new AnalysisLine(chess); state.line.kind='edited'; state.editor=null; state.selected=null; state.tab='study';
-    state.chartMode='line'; renderAll(); scheduleAnalysis();
+    renderAll(); scheduleAnalysis();
   }catch(error){$('editor-error').textContent=error.message;$('editor-error').hidden=false;}
 };
 $('study-first').onclick=()=>seekLine(0);
@@ -1200,7 +1205,7 @@ $('board').addEventListener('dragend',()=>{draggedSquare=null;renderBoard();});
 
 for (const tab of ['moves','study','review']) $(`${tab}-tab`).onclick = () => {
   if (tab === 'study' && !state.line) { startExploration(); return; }
-  pausePlayback(); state.tab = tab; renderStudy();
+  pausePlayback(); state.tab = tab; renderStudy(); renderChart();
   if (tab === 'moves') renderMoves();
   if (tab === 'study') revealStudyMove();
 };

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { explorationChart, seedExplorationBase } from '../src/exploration-chart.js';
+import { chartView, explorationChart, seedExplorationBase } from '../src/exploration-chart.js';
 import { parseGame, gameAt } from '../src/chess-core.js';
 import { AnalysisLine } from '../src/study.js';
 
@@ -45,8 +45,36 @@ test('new branch scores extend the original prefix and keep unknown branch posit
   line.results.set(0, base); line.results.set(2, undefined); line.results.set(3, last); line.seek(2);
   const chart = explorationChart(game, line, original);
   assert.equal(chart.originIndex, 2); assert.equal(chart.cursor, 4); assert.equal(chart.count, 6);
-  assert.deepEqual([...chart.results], [[0, original.get(0)], [1, original.get(1)], [2, base], [5, last]]);
+  assert.deepEqual([...chart.results], [[0, original.get(0)], [1, original.get(1)], [2, original.get(2)], [5, last]]);
+  assert.equal(line.results.get(0), base, 'the independently searched root remains available for branch grading');
   assert.equal(chart.results.has(3), false); assert.equal(chart.results.has(4), false);
+});
+
+test('the original anchor score stays fixed when an independent branch-root search completes', () => {
+  for (const originalScore of [cp(0), cp(-30), mate(4, 'b')]) {
+    const original = evaluations(), line = new AnalysisLine(gameAt(game, 2), ['g1f3']);
+    original.set(2, originalScore);
+    const before = explorationChart(game, line, original);
+    const branchRoot = cp(87); line.results.set(0, branchRoot); line.results.set(1, cp(90));
+    const after = explorationChart(game, line, original);
+    assert.equal(before.results.get(2), originalScore); assert.equal(after.results.get(2), originalScore);
+    assert.deepEqual([...after.results].slice(0, 3), [...before.results]);
+    assert.equal(after.results.get(3), line.results.get(1));
+    assert.equal(line.results.get(0), branchRoot);
+    assert.equal(original.get(2), originalScore);
+  }
+});
+
+test('a missing or invalid original anchor falls back to the branch root without changing either cache', () => {
+  for (const invalid of [undefined, null, {}, cp(NaN), cp(Infinity), { score: { type: 'unknown', value: 10 } }]) {
+    const original = evaluations(), line = new AnalysisLine(gameAt(game, 2));
+    if (invalid === undefined) original.delete(2); else original.set(2, invalid);
+    const branchRoot = mate(3); line.results.set(0, branchRoot);
+    const originalEntries = [...original], branchEntries = [...line.results];
+    const chart = explorationChart(game, line, original);
+    assert.equal(chart.results.get(2), branchRoot);
+    assert.deepEqual([...original], originalEntries); assert.deepEqual([...line.results], branchEntries);
+  }
 });
 
 test('the original future never leaks into an analyzed branch even when that branch follows recorded moves', () => {
@@ -115,4 +143,54 @@ test('chart construction never mutates its source game, branch, or either result
   assert.deepEqual([...line.results], branchEntries); assert.deepEqual(line.steps, steps);
   assert.deepEqual(structuredClone(line.prefixMoves), prefix); assert.equal(line.base.fen(), base); assert.equal(line.cursor, 1);
   assert.equal(chart.results.has(101), false, 'cached entries beyond the current branch length are excluded');
+});
+
+test('notation and summary views keep the full original graph and selected original index while retaining a branch', () => {
+  const original = evaluations(), line = new AnalysisLine(gameAt(game, 2), ['g1f3', 'b8c6']);
+  line.results.set(0, cp(800)); line.results.set(1, cp(900)); line.seek(1);
+  const branchEntries = [...line.results], prefix = structuredClone(line.prefixMoves);
+  for (const options of [{ index: 5 }, { tab: 'moves', index: 6 }, { tab: 'review', index: 0 }]) {
+    const view = chartView(game, line, original, options);
+    assert.equal(view.branch, null); assert.equal(view.results, original);
+    assert.equal(view.cursor, options.index); assert.equal(view.count, game.positions.length);
+    assert.equal(view.originIndex, 0); assert.equal(view.results.get(6), original.get(6));
+  }
+  assert.deepEqual(chartView(game, line, original), { branch: null, results: original,
+    cursor: 0, count: game.positions.length, originIndex: 0 });
+  assert.equal(line.cursor, 1); assert.deepEqual([...line.results], branchEntries);
+  assert.deepEqual(structuredClone(line.prefixMoves), prefix); assert.equal(line.steps.length, 2);
+});
+
+test('the study view uses the existing branch and its absolute cursor after the original prefix', () => {
+  const original = evaluations(), line = new AnalysisLine(gameAt(game, 2), ['g1f3', 'b8c6']);
+  line.results.set(1, cp(-42)); line.seek(1);
+  const view = chartView(game, line, original, { tab: 'study', index: 6 });
+  assert.equal(view.branch, line); assert.equal(view.originIndex, 2);
+  assert.equal(view.cursor, 3); assert.equal(view.count, 5);
+  assert.deepEqual([...view.results], [[0, original.get(0)], [1, original.get(1)],
+    [2, original.get(2)], [3, line.results.get(1)]]);
+  assert.equal(view.results.has(4), false); assert.equal(view.results.has(6), false);
+});
+
+test('late branch results do not change the original graph source and become visible when returning to study', () => {
+  const original = evaluations(), line = new AnalysisLine(gameAt(game, 2), ['g1f3', 'b8c6']);
+  line.seek(1);
+  const firstStudy = chartView(game, line, original, { tab: 'study', index: 2 });
+  assert.equal(firstStudy.results.has(3), false);
+  const notation = chartView(game, line, original, { tab: 'moves', index: 2 });
+  const branchRoot = cp(700), branchStep = cp(-88);
+  line.results.set(0, branchRoot); line.results.set(1, branchStep);
+  const updatedNotation = chartView(game, line, original, { tab: 'moves', index: 2 });
+  assert.equal(updatedNotation.branch, null); assert.equal(updatedNotation.results, notation.results);
+  assert.equal(updatedNotation.results.get(3), original.get(3));
+  const returned = chartView(game, line, original, { tab: 'study', index: 2 });
+  assert.equal(returned.branch, line); assert.equal(returned.results.get(2), original.get(2));
+  assert.equal(returned.results.get(3), branchStep); assert.equal(returned.results.has(4), false);
+  assert.equal(returned.cursor, firstStudy.cursor); assert.equal(line.results.get(0), branchRoot);
+});
+
+test('a study tab without a branch falls back to the original view', () => {
+  const original = evaluations();
+  assert.deepEqual(chartView(game, null, original, { tab: 'study', index: 4 }),
+    { branch: null, results: original, cursor: 4, count: game.positions.length, originIndex: 0 });
 });

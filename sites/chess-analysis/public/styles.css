@@ -167,9 +167,6 @@ main{padding-bottom:190px}
 .insight-basis{font-size:12px;color:#76846b;margin-bottom:0}
 .study-range{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:6px;flex:none;color:#6b8059;font-size:12px;margin-bottom:8px}
 .study-range .text-button{font-size:12px;text-decoration:underline;text-underline-offset:3px}
-.chart-source-buttons{display:flex;gap:4px;margin-left:auto;padding:3px;background:#eff3e9;border:1px solid #dce5d2;border-radius:6px}
-.chart-source-buttons button{display:inline-flex;align-items:center;justify-content:center;font-size:12px;line-height:18px;min-height:30px;padding:5px 10px;border-radius:4px;color:#60764f;white-space:nowrap}
-.chart-source-buttons button[aria-pressed="true"]{background:#537446;color:#fff;font-weight:650}
 .moves-card #review-content{flex:1;min-height:0;overflow:auto;overscroll-behavior:contain}
 .analysis-column .study-panel{display:flex;flex-direction:column;flex:1;min-height:0;border:0;border-radius:0;padding:16px;margin:0}
 .playback-controls,.study-table-header,.move-explanation,.study-exports{flex:none}
@@ -384,8 +381,6 @@ main{width:100%;flex:none;padding-bottom:24px}
 .move-controls #move-position{min-width:100px;font-size:17px;font-weight:600;color:#4e6a41}
 #chart-dock{position:relative;inset:auto;z-index:auto;flex:none;padding:11px 14px 10px;background:#fafcf7;border:0;border-bottom:1px solid #dce5d5;box-shadow:none}
 #chart-dock .section-heading{flex-wrap:wrap;gap:5px 8px}
-#chart-dock .chart-source-buttons{margin-left:auto;padding:2px}
-#chart-dock .chart-source-buttons button{font-size:11px;min-height:27px;padding:4px 7px}
 #chart-dock .micro-label{display:block;text-align:right;margin-top:4px;font-size:11px}
 #chart-dock .chart-wrap{height:66px;margin-top:6px}
 #chart-dock .chart-footer{font-size:10px}
