@@ -34,6 +34,20 @@ function finalResult(pending, engineBestmove) {
   return { score: first.score, depth: first.depth, lines, bestmove: first.pv[0], engineBestmove, multipvComplete: Boolean(pending.completed) };
 }
 
+// Search activity is not an evaluation. In a long iteration Stockfish also
+// reports bounds and current-move/node messages with no publishable score/PV.
+// Keep those metrics observable without admitting them to the result snapshot.
+function searchActivity(line) {
+  if (!line.startsWith('info ') || line.startsWith('info string ')) return null;
+  const metrics = {};
+  for (const key of ['depth', 'seldepth', 'multipv', 'nodes', 'nps', 'time', 'hashfull']) {
+    const match = line.match(new RegExp(`\\b${key} (\\d+)(?=\\s|$)`));
+    const value = match ? Number(match[1]) : NaN;
+    if (Number.isSafeInteger(value)) metrics[key] = value;
+  }
+  return Object.keys(metrics).length ? metrics : null;
+}
+
 export class StockfishEngine {
   constructor(WorkerType = Worker, { engineId = 'lite', hash = 32, threads = 1, onLoad = () => {} } = {}) {
     this.pending = null;
@@ -118,7 +132,7 @@ export class StockfishEngine {
     this.searchQueue=task.catch(()=>{});
     return task;
   }
-  async search(chess, { depth = 16, movetime = 1200, multipv = 3, searchMoves, onInfo, searchMode } = {}) {
+  async search(chess, { depth = 16, movetime = 1200, multipv = 3, searchMoves, onInfo, onSearchInfo, searchMode } = {}) {
     const generation = this.searchGeneration;
     await this.ready;
     for (;;) {
@@ -148,7 +162,7 @@ export class StockfishEngine {
       const timeout=searchMode==='depth'?(depth>=24?600000:depth>=20?300000:180000):movetime+15000;
       const timer = setTimeout(() => this.fail(new Error('분석을 완료하지 못했습니다. 깊이를 낮추거나 다시 시도해 주세요.')), timeout);
       this.idle = new Promise(done => { this.resolveIdle = done; });
-      this.pending = { resolve, reject, timer, turn: chess.turn(), rootMoves, multipv: candidateCount, iterations: new Map(), rootLines: new Map(), completed: null, onInfo, cancelled: false, searchMode, requestedDepth:depth };
+      this.pending = { resolve, reject, timer, turn: chess.turn(), rootMoves, multipv: candidateCount, iterations: new Map(), rootLines: new Map(), completed: null, onInfo, onSearchInfo, cancelled: false, searchMode, requestedDepth:depth };
       this.send(`setoption name MultiPV value ${candidateCount}`);
       this.send(positionCommand(chess));
       this.send(`go depth ${depth}${searchMode==='depth'?'':` movetime ${movetime}`}${roots ? ` searchmoves ${roots.join(' ')}` : ''}`);
@@ -157,6 +171,13 @@ export class StockfishEngine {
   handleLine(line) {
     const pending = this.pending;
     if (!pending) return;
+    if (!pending.cancelled && typeof pending.onSearchInfo === 'function') {
+      const activity = searchActivity(line);
+      if (activity) {
+        try { Promise.resolve(pending.onSearchInfo(activity)).catch(() => {}); }
+        catch { /* An activity observer cannot interrupt the engine protocol. */ }
+      }
+    }
     const info = parseInfo(line, pending.turn);
     if (info && !pending.cancelled) {
       recordIteration(pending, info);

@@ -13,10 +13,10 @@ function searchSnapshot(value) {
 // The whole-game job belongs to its game and result map, not the currently
 // displayed tab, board cursor, or foreground engine generation.
 export class BackgroundReview {
-  constructor({ run = reviewGame, onStart = noop, onResult = noop,
+  constructor({ run = reviewGame, onStart = noop, onResult = noop, onProgress = noop,
     onComplete = noop, onError = noop, onSettled = noop } = {}) {
     this.run = run;
-    this.callbacks = { onStart, onResult, onComplete, onError, onSettled };
+    this.callbacks = { onStart, onResult, onProgress, onComplete, onError, onSettled };
     this.current = null;
     this.sequence = 0;
     this.drain = Promise.resolve();
@@ -40,7 +40,8 @@ export class BackgroundReview {
     this.stop();
     const previous = this.drain;
     const job = { ...captured, spec: captured, id: ++this.sequence,
-      abort: new AbortController(), analyzed: 0, reviewed: 0, status: 'waiting' };
+      abort: new AbortController(), analyzed: 0, reviewed: 0, status: 'waiting',
+      phase: 'position', activeSearches: new Map() };
     this.current = job;
     const isActive = () => this.current === job && !job.abort.signal.aborted;
     const pending = (async () => {
@@ -54,6 +55,19 @@ export class BackgroundReview {
         if (!isActive()) return null;
         const { game, ...configuration } = captured;
         const outcome = await this.run(game, { ...configuration, signal: job.abort.signal,
+          onProgress: event => {
+            if(!isActive()||!['position','review'].includes(event.phase))return;
+            job.phase=event.phase;
+            if(Number.isInteger(event.index)){
+              const key=`${event.phase}:${event.index}`;
+              if(event.type==='complete')job.activeSearches.delete(key);
+              else {
+                const previous=event.type==='search'?{}:job.activeSearches.get(key);
+                job.activeSearches.set(key,Object.freeze({startedAt:Date.now(),...previous,...event}));
+              }
+            }
+            return this.callbacks.onProgress(job,event);
+          },
           onResult: (result, index, phase) => {
             if (!isActive()) return;
             captured.results.set(index, result);

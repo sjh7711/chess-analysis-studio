@@ -45,26 +45,27 @@ function fakeEngines({ gates, scoreChanges = {}, beforeSearch = () => {} } = {})
   return { createEngine, calls, workers };
 }
 
-test('all independent source positions finish once before move comparisons, even with out-of-order completions', async () => {
-  const gates = game.positions.map(deferred), events = [];
-  const fake = fakeEngines({ gates, beforeSearch: ({ restricted, calls }) => {
-    if (restricted) assert.equal(calls.filter(call => !call.restricted).length, game.positions.length);
+test('ready comparisons fill idle slots while an unrelated source position remains unfinished', async () => {
+  const gates = game.positions.map(deferred), events = [],published=new Set();
+  const fake = fakeEngines({ gates, beforeSearch: ({ restricted,index }) => {
+    if (restricted)assert.ok(published.has(index)&&published.has(index+1),'a comparison requires its own completed parent and child');
   } });
-  const pending = reviewGame(game, { concurrency: 2, createEngine: fake.createEngine,
+  const pending = reviewGame(game, { concurrency: 3, createEngine: fake.createEngine,
     options, comparisonOptions, configKey,
-    onResult: (result, index, phase) => events.push({ result, index, phase }),
+    onResult: (result, index, phase) => {if(phase==='position')published.add(index);events.push({ result, index, phase });},
   });
   await turn();
-  gates[1].resolve(); gates[2].resolve(); gates[3].resolve(); await turn();
-  assert.deepEqual(events.map(event => [event.index, event.phase]), [[1, 'position'], [2, 'position'], [3, 'position']]);
-  assert.equal(fake.calls.filter(call => call.restricted).length, 0, 'phase 2 waits for every source evaluation');
-  gates[0].resolve(); gates[4].resolve();
+  gates[1].resolve(); gates[2].resolve(); gates[3].resolve();gates[4].resolve(); await turn();
+  assert.deepEqual([...published].sort(),[1,2,3,4]);
+  assert.deepEqual(events.filter(event=>event.phase==='review').map(event=>event.index).sort(),[2,3,4]);
+  assert.equal(fake.calls.some(call=>call.restricted&&call.index===0),false,'the unready move next to the straggler must wait');
+  gates[0].resolve();
   const outcome = await pending;
   assert.equal(outcome.analyzed, game.positions.length); assert.equal(outcome.reviewed, game.moves.length);
   assert.deepEqual(fake.calls.filter(call => !call.restricted).map(call => call.index).sort(), [0, 1, 2, 3, 4]);
   assert.deepEqual(fake.calls.filter(call => call.restricted).map(call => call.index).sort(), [0, 1, 2, 3]);
   const firstReview = events.findIndex(event => event.phase === 'review');
-  assert.equal(firstReview, game.positions.length);
+  assert.ok(firstReview<events.findIndex(event=>event.phase==='position'&&event.index===0));
   for (let index = 1; index < game.positions.length; index++) {
     const before = outcome.results.get(index - 1), after = outcome.results.get(index), move = game.moves[index - 1];
     assert.equal(hasMoveReview(before, after, move), true);
@@ -75,13 +76,39 @@ test('all independent source positions finish once before move comparisons, even
     assert.equal(after.moveReview.depth, before.depth, 'restricted comparisons use the completed root depth');
     assert.equal(before.configKey, configKey); assert.equal(before.requestedDepth, options.depth);
   }
-  assert.equal(fake.workers.length, 2, 'both phases reuse the same workers');
+  assert.equal(fake.workers.length, 3, 'overlapping root and comparison jobs reuse the same bounded workers');
   assert.equal(fake.workers.reduce((sum, worker) => sum + worker.resets, 0), game.positions.length + game.moves.length);
   for (const worker of fake.workers) {
     const ownCalls = fake.calls.filter(call => call.worker === worker.id);
     assert.deepEqual(ownCalls.map(call => call.reset), ownCalls.map((_, index) => index + 1), 'each reused worker has a fresh cache exactly once per job');
   }
   assert.ok(fake.workers.every(worker => worker.disposed === 1));
+});
+
+test('an asynchronous source publisher must finish before either neighboring comparison becomes ready',async()=>{
+  const publication=deferred(),straggler=deferred(),gates=[];gates[4]=straggler;
+  const events=[],fake=fakeEngines({gates});
+  let publishing=false;
+  const pending=reviewGame(game,{concurrency:3,createEngine:fake.createEngine,options,comparisonOptions,configKey,
+    onResult:async(result,index,phase)=>{
+      if(phase==='position'&&index===1){publishing=true;await publication.promise;}
+      events.push([phase,index,result]);
+    }});
+  pending.catch(()=>{});
+  try {
+    await turn();assert.equal(publishing,true);
+    assert.equal(events.some(([phase,index])=>phase==='position'&&index===1),false);
+    assert.equal(fake.calls.some(call=>call.restricted&&[0,1].includes(call.index)),false,
+      'neither comparison adjacent to a pending publisher may start');
+    assert.ok(events.some(([phase,index])=>phase==='review'&&index===3),
+      'an unrelated ready comparison still fills the free slot');
+    publication.resolve();await turn();
+    assert.ok(events.some(([phase,index])=>phase==='review'&&index===1));
+    assert.ok(events.some(([phase,index])=>phase==='review'&&index===2));
+    assert.equal(events.some(([phase,index])=>phase==='position'&&index===4),false);
+    straggler.resolve();const outcome=await pending;
+    assert.equal(outcome.analyzed,5);assert.equal(outcome.reviewed,4);
+  }finally {publication.resolve();straggler.resolve();await pending.catch(()=>{});}
 });
 
 test('a completed cached review performs no redundant position or comparison searches', async () => {
@@ -258,32 +285,100 @@ test('interactive work takes the next shared slot while the original review fini
   assert.ok(fake.workers.every(worker => worker.disposed === 1));
 });
 
-test('shared review forwards its cancellation and worker configuration to both phases without taking pool ownership', async () => {
-  const controller = new AbortController(), fake = fakeEngines(), phases = [];
-  let disposed = 0;
+test('shared review uses one root map and individual comparisons with a linked owned signal without taking pool ownership', async () => {
+  const controller = new AbortController(), fake = fakeEngines(), phases = [],singles=[];
+  const backing=new ReviewWorkerPool({concurrency:2,createWorker:fake.createEngine});
+  let disposed = 0,ownedSignal;
+  const configuration=settings=>{
+    assert.notEqual(settings.signal,controller.signal);
+    ownedSignal??=settings.signal;assert.equal(settings.signal,ownedSignal);
+    assert.equal(settings.priority,0);assert.equal(settings.workerKey,'lite:64');
+    assert.equal(settings.createWorker,fake.createEngine);
+  };
   const pool = {
     async map(items, settings) {
-      assert.equal(settings.signal, controller.signal);
-      assert.equal(settings.priority, 0);
-      assert.equal(settings.workerKey, 'lite:64');
-      assert.equal(settings.createWorker, fake.createEngine);
+      configuration(settings);
       assert.equal(settings.isolateFailures, true);
       phases.push(items);
-      const worker = fake.createEngine(0), values = [];
-      for (const [offset, item] of items.entries()) {
-        const result = await settings.run(worker, item, offset, controller.signal);
-        await settings.onResult(result, offset, item); values.push(result);
-      }
-      return values;
+      return backing.map(items,settings);
     },
+    submit(settings){configuration(settings);singles.push(settings);return backing.submit(settings);},
     async dispose() { disposed++; },
   };
-  const outcome = await reviewGame(game, { pool, workerKey: 'lite:64', signal: controller.signal,
-    createEngine: fake.createEngine, options, comparisonOptions, configKey });
-  assert.equal(outcome.analyzed, game.positions.length);
-  assert.equal(outcome.reviewed, game.moves.length);
-  assert.deepEqual(phases, [[0, 1, 2, 3, 4], [1, 2, 3, 4]]);
-  assert.equal(disposed, 0);
+  try {
+    const outcome = await reviewGame(game, { pool, workerKey: 'lite:64', signal: controller.signal,
+      createEngine: fake.createEngine, options, comparisonOptions, configKey });
+    assert.equal(outcome.analyzed, game.positions.length);
+    assert.equal(outcome.reviewed, game.moves.length);
+    assert.deepEqual(phases, [[0, 1, 2, 3, 4]]);assert.equal(singles.length,4);
+    assert.equal(disposed, 0);assert.equal(backing.closed,false);
+  }finally {await backing.dispose();}
+});
+
+test('pipelined 1, 2, 4 and 6 worker runs retain the same complete queries, depths and review results',async()=>{
+  let reference;
+  for(const concurrency of [1,2,4,6]) {
+    const fake=fakeEngines(),outcome=await reviewGame(game,{concurrency,createEngine:fake.createEngine,
+      options,comparisonOptions,configKey});
+    const snapshot={results:[...outcome.results].sort(([a],[b])=>a-b),
+      queries:fake.calls.map(({index,restricted,settings,history})=>JSON.stringify({index,restricted,settings,history})).sort()};
+    if(reference)assert.deepEqual(snapshot,reference);else reference=snapshot;
+    assert.equal(fake.calls.length,game.positions.length+game.moves.length);
+    assert.ok(fake.workers.length<=concurrency);
+    assert.equal(fake.workers.reduce((sum,worker)=>sum+worker.resets,0),fake.calls.length);
+    assert.ok(fake.workers.every(worker=>worker.disposed===1));
+  }
+});
+
+test('cached ready pairs start immediately but an old-policy source cannot unlock either neighboring comparison',async()=>{
+  const initial=fakeEngines(),baseline=await reviewGame(game,{concurrency:2,createEngine:initial.createEngine,
+    options,comparisonOptions,configKey});
+  const cached=new Map([...baseline.results].map(([index,result])=>{
+    const copy={...result};delete copy.moveReview;return [index,copy];
+  }));
+  cached.delete(0);cached.set(2,{...cached.get(2),configKey:'older-policy',score:cp(999)});
+  const original=JSON.stringify([...cached]),gates=[deferred(),null,deferred()],events=[],ready=new Set([1,3,4]);
+  const fake=fakeEngines({gates,beforeSearch:({restricted,index})=>{
+    if(restricted)assert.ok(ready.has(index)&&ready.has(index+1));
+  }});
+  const pending=reviewGame(game,{concurrency:4,createEngine:fake.createEngine,results:cached,
+    isCached:result=>result?.configKey===configKey,options,comparisonOptions,configKey,
+    onResult:(result,index,phase)=>{if(phase==='position')ready.add(index);events.push([phase,index,result]);}});
+  await turn();
+  assert.deepEqual(events.filter(([phase])=>phase==='review').map(([,index])=>index),[4]);
+  assert.deepEqual(fake.calls.filter(call=>!call.restricted).map(call=>call.index).sort(),[0,2]);
+  gates[0].resolve();gates[2].resolve();const outcome=await pending;
+  assert.equal(outcome.analyzed,2);assert.equal(outcome.reviewed,4);
+  assert.equal(outcome.results.get(2).score.value,102);
+  assert.deepEqual(fake.calls.filter(call=>call.restricted).map(call=>call.index).sort(),[0,1,2,3]);
+  assert.equal(JSON.stringify([...cached]),original);
+});
+
+for(const failureFrom of ['search','publication'])test(`a pipelined review ${failureFrom} failure cancels its root straggler while unrelated shared work survives`,async()=>{
+  const rootGate=deferred(),foregroundGate=deferred(),gates=[];gates[4]=rootGate;
+  const failure=new Error(`review ${failureFrom} failed`),events=[];
+  const fake=fakeEngines({gates,beforeSearch:({restricted})=>{
+    if(restricted&&failureFrom==='search')throw failure;
+  }});
+  const pool=new ReviewWorkerPool({concurrency:3,createWorker:fake.createEngine});
+  let foregroundWorker;
+  const foreground=pool.submit({priority:10,run:async worker=>{foregroundWorker=worker;await foregroundGate.promise;return 'interactive result';}});
+  const pending=reviewGame(game,{pool,createEngine:fake.createEngine,options,comparisonOptions,configKey,
+    onResult:(_,index,phase)=>{events.push([phase,index]);if(phase==='review'&&failureFrom==='publication')throw failure;}});
+  const rejected=assert.rejects(pending,error=>error===failure);
+  try {
+    await turn();
+    assert.ok(fake.calls.some(call=>!call.restricted&&call.index===4));
+    assert.ok(fake.calls.some(call=>call.restricted),'a ready comparison must fail before the straggler returns');
+    assert.ok(fake.workers.some(worker=>worker.cancelled>0));
+    assert.equal(foregroundWorker.cancelled,0);assert.equal(foregroundWorker.disposed,0);
+    assert.equal(pool.closed,false);
+    rootGate.resolve();await rejected;
+    assert.equal(events.some(([phase,index])=>phase==='position'&&index===4),false);
+    assert.equal(foregroundWorker.cancelled,0);assert.equal(pool.running,1);
+    foregroundGate.resolve();assert.equal(await foreground,'interactive result');
+    assert.equal(await pool.submit({run:async()=>42}),42);
+  }finally {rootGate.resolve();foregroundGate.resolve();await pool.dispose();}
 });
 
 test('cancelling a shared original review leaves queued foreground work and the application pool usable', async () => {

@@ -389,7 +389,9 @@ main{width:100%;flex:none;padding-bottom:24px}
 #chart-dock #analyze-position{font-size:13px;padding:5px 0;min-height:30px;white-space:nowrap;color:#4e6f3e}
 #chart-dock .analysis-progress{width:100%;margin:7px 0 10px}
 #chart-dock .analysis-progress>div{font-size:13px}
+#chart-dock .analysis-progress>div{white-space:normal;align-items:flex-start}
 #chart-dock .analysis-progress progress{height:4px;width:100%}
+#chart-dock .progress-detail{font-size:11px;line-height:1.5;color:var(--ui-muted,#617656);overflow-wrap:anywhere}
 .move-coach{display:flex;flex-direction:column;padding:12px 14px;background:#f1f6e9;border:1px solid #dce6ce;border-radius:8px;height:300px}
 .coach-display-options{display:flex;justify-content:flex-end;align-items:center;flex:none;margin-top:9px;padding-top:8px;border-top:1px solid var(--ui-border,#dce6ce)}
 .coach-display-options .arrow-option{cursor:pointer;color:var(--ui-muted,#617656)}

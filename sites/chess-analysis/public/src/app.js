@@ -2,6 +2,7 @@ import { Chess, parseGame, gameAt, classifyMove, hasMoveReview, assessedMoveResu
 import { StockfishEngine } from './engine.js';
 import { ENGINES, DEFAULT_ENGINE_ID, REVIEW_ENGINE_ID, AUTO_THREAD_LABEL, availableReviewWorkers, automaticThreads, engineId, normalizePerformance, searchOptions, reviewOptions, gameReviewOptions, analysisKey } from './engine-options.js';
 import { BackgroundReview } from './background-review.js';
+import { reviewProgress } from './review-progress.js';
 import { ContinuationAnalysis } from './continuation-analysis.js';
 import { ReviewWorkerPool } from './review-pool.js';
 import { analyzeForeground } from './foreground-analysis.js';
@@ -65,6 +66,7 @@ const backgroundReview=new BackgroundReview({
   onStart(job){
     completionAlerts.begin(job.id);
     document.title='체스 분석';
+    job.progressClock=setInterval(()=>{if(ownsReview(job))renderReviewProgress();},1000);
     if(ownsReview(job))renderResults();
   },
   onResult(job){
@@ -75,6 +77,13 @@ const backgroundReview=new BackgroundReview({
     });
     if((job.analyzed+job.reviewed)%5===0)persist();
   },
+  onProgress(job){
+    if(!ownsReview(job)||job.progressTimer)return;
+    job.progressTimer=setTimeout(()=>{
+      job.progressTimer=null;
+      if(ownsReview(job))renderReviewProgress();
+    },180);
+  },
   onComplete(job,outcome){
     if(ownsReview(job)&&(outcome.analyzed||outcome.reviewed))completionAlerts.complete(job.id,
       `${job.game.headers.White||'백'} vs ${job.game.headers.Black||'흑'} · ${job.game.positions.length}개 국면 분석 완료`);
@@ -83,6 +92,8 @@ const backgroundReview=new BackgroundReview({
     if(ownsReview(job)&&error.name!=='AbortError'){state.error=error.message;toast(error.message,true);}
   },
   onSettled(job){
+    clearTimeout(job.progressTimer);
+    clearInterval(job.progressClock);
     if(job.renderFrame)cancelAnimationFrame(job.renderFrame);
     completionAlerts.cancel(job.id);
     if(!ownsReview(job))return;
@@ -547,21 +558,36 @@ function renderAnalysis() {
   $('analyze-game').disabled = !!state.editor&&!full;
   $('restart-game').hidden = !!full || !state.game.moves.length || complete === 0 || complete === state.game.positions.length;
   $('restart-game').disabled = !!state.editor;
-  $('analysis-progress').hidden = !full;
-  const evaluated=state.game.positions.filter((_,index)=>isCached(state.results.get(index))).length;
-  const totalTasks=state.game.positions.length+state.game.moves.length;
-  const doneTasks=evaluated+Math.max(0,complete-Number(isCached(state.results.get(0))));
+  renderReviewProgress();
+  renderArrow();
+}
+
+function renderReviewProgress() {
+  const full=currentGameReview();
+  const progress=reviewProgress(state.game,state.results,full?.isCached||isCached);
+  $('analysis-progress').hidden=!full;
   const responsive=analysisPool?.interactiveMetrics.throttled;
   const workload=responsive?' · 탐색 응답 우선 · 원본 작업 조절 중':state.line?' · 탐색 중에도 원본 분석 계속':'';
-  $('progress-text').textContent = evaluated<state.game.positions.length
-    ? `국면 분석 · ${evaluated} / ${state.game.positions.length} · 최대 ${performanceOptions.threads}개 작업${workload}`
-    : `수 검토 · ${Math.max(0,complete-1)} / ${state.game.moves.length}${workload}`;
-  const percent = Math.round(doneTasks/totalTasks*100);
+  const phase=progress.phase;
+  $('progress-text').textContent=phase==='position'
+    ? `국면 분석 · ${progress.evaluated} / ${progress.positionTotal} · 수 검토 ${progress.reviewed} / ${progress.reviewTotal}${workload}`
+    : `수 검토 · ${progress.reviewed} / ${progress.reviewTotal}${workload}`;
+  const searches=[...(full?.activeSearches?.values()||[])].sort((a,b)=>a.index-b.index);
+  const search=searches.find(item=>item.phase===phase)||searches[0],move=search&&state.game.moves[search.index-1];
+  const label=move?`${move.before.split(' ')[5]}${move.color==='w'?'.':'...'} ${move.san}`:'시작 국면';
+  const depth=Number.isInteger(search?.depth)&&search.depth>0?search.depth:0;
+  const target=search?.requestedDepth||full?.options.depth;
+  const elapsed=search?.startedAt?Math.max(0,Math.floor((Date.now()-search.startedAt)/1000)):0;
+  const detail=search
+    ? `${label} · ${depth?`탐색 깊이 ${depth} / ${target}`:`깊이 ${target} 계산 준비`} · ${elapsed}초 경과 · ${searches.length}개 작업 중${search.nodes>0?` · ${search.nodes.toLocaleString()} 노드`:''}`
+    : full?.status==='waiting'?'이전 작업을 정리하고 분석을 시작합니다.'
+    : phase==='review'?'국면 평가가 끝났습니다. 실전 수와 대안 수를 비교합니다.':'국면별 평가를 계산합니다.';
+  $('progress-detail').textContent=detail;
+  const percent=Math.round(progress.done/progress.total*100);
   $('progress-percent').textContent = `${percent}%`;
-  $('progress-bar').max = totalTasks;
-  $('progress-bar').value = doneTasks;
+  $('progress-bar').max = progress.total;
+  $('progress-bar').value = progress.done;
   $('analysis-progress').title='국면 분석과 수 검토의 완료 작업 수입니다. 작업별 소요 시간은 다를 수 있습니다.';
-  renderArrow();
 }
 
 function renderMoves(scroll = false, grades = gameGrades()) {
