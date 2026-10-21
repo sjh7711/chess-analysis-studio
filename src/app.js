@@ -1,5 +1,6 @@
 import { Chess, parseGame, gameAt, classifyMove, hasMoveReview, assessedMoveResult, MOVE_GRADES, GRADING_BASIS, formatScore, scoreValue, exportPgn } from './chess-core.js';
 import { StockfishEngine } from './engine.js';
+import { CompletedSearchCache } from './search-result-cache.js';
 import { ENGINES, DEFAULT_ENGINE_ID, REVIEW_ENGINE_ID, AUTO_THREAD_LABEL, availableReviewWorkers, automaticThreads, engineId, normalizePerformance, searchOptions, reviewOptions, gameReviewOptions, analysisKey } from './engine-options.js';
 import { BackgroundReview } from './background-review.js';
 import { reviewProgress } from './review-progress.js';
@@ -7,6 +8,7 @@ import { ContinuationAnalysis } from './continuation-analysis.js';
 import { ReviewWorkerPool } from './review-pool.js';
 import { analyzeForeground } from './foreground-analysis.js';
 import { isPositionResultCached } from './analysis-cache.js';
+import { matchingOnlineSnapshot } from './online-game-cache.js';
 import { chartView, seedExplorationBase } from './exploration-chart.js';
 import { pieceSvg, pieceSnapshot, pieceTransitions, StepNavigation, capturedPieces, capturedMarkup } from './pieces.js';
 import { BoardAnnotations } from './annotations.js';
@@ -46,6 +48,7 @@ let selectedEngine = DEFAULT_ENGINE_ID, performanceOptions = normalizePerformanc
 const state = { game:parseGame(SAMPLE_PGN), index:59, flipped:false, results:new Map(), line:null, editor:null, playing:false, selected:null, mode:null, error:null, tab:'moves' };
 const annotations=new BoardAnnotations($('board'),{isFlipped:()=>state.flipped,enabled:()=>!state.editor,toggleButton:$('annotation-mode'),clearButton:$('annotation-clear')});
 let analysisPool=null,foregroundAbort=null,generation = 0, debounce, toastTimer, pendingPromotion, draggedSquare, suppressClickUntil = 0;
+const completedSearches=new CompletedSearchCache();
 let continuationRenderFrame=0;
 const continuationAnalysis=new ContinuationAnalysis({
   onStart:updateContinuationProgress,
@@ -195,7 +198,7 @@ function isCached(result) {
 function sharedEnginePool() {
   if(!analysisPool)analysisPool=new ReviewWorkerPool({concurrency:performanceOptions.threads,
     interactiveBackgroundLimit:1,interactiveCooldownMs:350,
-    createWorker:()=>new StockfishEngine(Worker,{engineId:REVIEW_ENGINE_ID,hash:performanceOptions.hash,threads:1})});
+    createWorker:()=>new StockfishEngine(Worker,{engineId:REVIEW_ENGINE_ID,hash:performanceOptions.hash,threads:1,resultCache:completedSearches})});
   analysisPool.setConcurrency(performanceOptions.threads);
   return analysisPool;
 }
@@ -230,7 +233,7 @@ function completeContinuation(line=state.line) {
   const hash=performanceOptions.hash,selected=selectedEngine;
   void continuationAnalysis.start({game:state.game,line,pool:sharedEnginePool(),
     workerKey:`${selected}:${hash}:1`,
-    createWorker:()=>new StockfishEngine(Worker,{engineId:selected,hash,threads:1}),
+    createWorker:()=>new StockfishEngine(Worker,{engineId:selected,hash,threads:1,resultCache:completedSearches}),
     options:searchOptions(Number($('depth').value),{...performanceOptions,threads:1}),
     configKey:key,isCached:result=>isPositionResultCached(result,key),owns:ownsContinuation});
   const job=continuationAnalysis.active;
@@ -242,7 +245,7 @@ function foregroundLease(run,task,{engineId:selected=selectedEngine,hash=perform
   foregroundAbort=request;
   return sharedEnginePool().submit({priority:10,signal:request.signal,
     workerKey:`${selected}:${hash}:1`,
-    createWorker:()=>new StockfishEngine(Worker,{engineId:selected,hash,threads:1,onLoad:percent=>{
+    createWorker:()=>new StockfishEngine(Worker,{engineId:selected,hash,threads:1,resultCache:completedSearches,onLoad:percent=>{
       if(run!==generation)return;
       $('engine-download').hidden=selected!=='full'||percent>=100;
       $('engine-download').textContent=`Stockfish 19 다운로드 ${percent}%`;
@@ -354,7 +357,7 @@ async function analyzeGame(restart = false) {
     concurrency=performanceOptions.threads,overview=performanceOptions.reviewMode!=='precise';
   state.error = null;
   const work=backgroundReview.start({game,results,concurrency,hash,pool:sharedEnginePool(),workerKey:`${REVIEW_ENGINE_ID}:${hash}:1`,
-    createEngine:()=>new StockfishEngine(Worker,{engineId:REVIEW_ENGINE_ID,hash,threads:1}),
+    createEngine:()=>new StockfishEngine(Worker,{engineId:REVIEW_ENGINE_ID,hash,threads:1,resultCache:completedSearches}),
     isCached:result=>!!result?.terminal||result?.configKey===key&&(!result.overview||overview),
     options:overviewOptions,comparisonOptions:options,configKey:key,overview});
   renderResults();
@@ -1518,7 +1521,9 @@ if(onlineGameId&&/^[a-f0-9]{32}$/.test(onlineGameId)){
     const response=await fetch('/api/play/games/'+onlineGameId,{cache:'no-store'}),data=await response.json();
     if(!response.ok)throw new Error(data.error||'경기 기록을 불러오지 못했습니다.');
     if(data.game.status!=='finished'||!data.game.pgn)throw new Error('끝난 대국만 분석할 수 있습니다.');
-    setGame(parseGame(data.game.pgn));onlineLoaded=true;toast('경기 기록을 불러왔습니다. 분석을 시작합니다.');
+    const game=parseGame(data.game.pgn),saved=matchingOnlineSnapshot(game,snapshotCurrent());
+    setGame(game,saved);onlineLoaded=true;
+    toast(saved?'경기 기록과 저장된 분석을 불러왔습니다.':'경기 기록을 불러왔습니다. 분석을 시작합니다.');
   }catch(error){toast(error.message,true);}
 }
 if(!onlineLoaded){renderGame();renderMoves(true);scheduleAnalysis(true);}

@@ -1,5 +1,6 @@
-import { parseInfo, positionCommand, terminalResult, uciMove } from './chess-core.js';
+import { Chess, parseInfo, positionCommand, terminalResult, uciMove } from './chess-core.js';
 import { workerUrl } from './engine-options.js';
+import { exactSearchKey, SEARCH_CACHE_REVISION } from './search-result-cache.js';
 
 function recordIteration(pending, info) {
   if (!pending.rootMoves.has(info.pv[0]) || info.multipv < 1 || info.multipv > pending.multipv) return;
@@ -49,7 +50,7 @@ function searchActivity(line) {
 }
 
 export class StockfishEngine {
-  constructor(WorkerType = Worker, { engineId = 'lite', hash = 32, threads = 1, onLoad = () => {} } = {}) {
+  constructor(WorkerType = Worker, { engineId = 'lite', hash = 32, threads = 1, onLoad = () => {}, resultCache = null } = {}) {
     this.pending = null;
     this.resetPending = null;
     this.initialized = false;
@@ -58,23 +59,50 @@ export class StockfishEngine {
     this.searchQueue = Promise.resolve();
     this.closed = false;
     this.abort = new AbortController();
+    this.fallbackTried = false;
+    this.resultCache = resultCache;
+    this.searchIdentity = Object.freeze({engineId,hash,threads});
     this.ready = new Promise((resolve, reject) => {
       this.rejectReady = reject;
-      this.readyTimer = setTimeout(() => this.fail(new Error('엔진을 불러오지 못했습니다. 다시 시도하거나 Lite를 선택해 주세요.')), engineId === 'full' ? 180000 : 20000);
-      workerUrl(engineId, { signal: this.abort.signal, threads, onProgress: onLoad }).then(url => {
+      const loadFailure = () => {
+        if (!this.retryInitialization?.()) this.fail(new Error('엔진을 불러오지 못했습니다. 다시 시도하거나 Lite를 선택해 주세요.'));
+      };
+      const armReadyTimer = () => {
+        clearTimeout(this.readyTimer);
+        this.readyTimer = setTimeout(loadFailure, engineId === 'full' ? 180000 : 20000);
+      };
+      const initialize = async (compatibility = false) => {
+      const url = await workerUrl(engineId, { signal: this.abort.signal, threads, onProgress: onLoad, compatibility });
       if (this.closed) return;
       onLoad(100);
-      this.worker = new WorkerType(url);
-      this.worker.onmessage = event => {
+      const sharedLite = engineId === 'lite' && threads === 1 && /\/stockfish-19-lite\.js(?:\?|$)/.test(url);
+      let worker;
+      const fallback = () => {
+        if (this.closed || this.initialized || !sharedLite || this.fallbackTried) return false;
+        this.fallbackTried = true;
+        if (this.worker === worker) this.worker = null;
+        worker?.terminate();
+        armReadyTimer();
+        void initialize(true).catch(error => this.fail(error));
+        return true;
+      };
+      this.retryInitialization = fallback;
+      try { worker = new WorkerType(url); }
+      catch (error) { if (!fallback()) throw error; return; }
+      this.worker = worker;
+      this.executionBuild = url.split('/').at(-1).split(/[?#]/)[0];
+      worker.onmessage = event => {
+        if (this.closed || this.worker !== worker) return;
         for (const line of String(event.data).split('\n')) {
           if (line === 'uciok') {
-            if (threads > 1) this.send(`setoption name Threads value ${threads}`);
+            if (threads > 1 || sharedLite) this.send(`setoption name Threads value ${threads}`);
             this.send(`setoption name Hash value ${hash}`);
             this.send('isready');
           } else if (line === 'readyok') {
             if (!this.initialized) {
               this.initialized = true;
               clearTimeout(this.readyTimer);
+              if (typeof window !== 'undefined') console.debug('Stockfish execution:', this.executionBuild, 'search threads:', threads);
               resolve();
             } else if (this.resetPending) {
               const reset = this.resetPending;
@@ -87,13 +115,19 @@ export class StockfishEngine {
           } else this.handleLine(line);
         }
       };
-      this.worker.onerror = event => {
+      worker.onerror = event => {
+        if (this.closed || this.worker !== worker || fallback()) return;
         console.error('Stockfish worker:',event.message);
         this.fail(new Error('Stockfish 실행 중 오류가 발생했습니다. 새로고침 후 다시 시도해 주세요.'));
       };
-      this.worker.onmessageerror = () => this.fail(new Error('엔진 응답을 읽지 못했습니다.'));
+      worker.onmessageerror = () => {
+        if (this.closed || this.worker !== worker || fallback()) return;
+        this.fail(new Error('엔진 응답을 읽지 못했습니다.'));
+      };
       this.send('uci');
-      }).catch(error => this.fail(error));
+      };
+      armReadyTimer();
+      void initialize().catch(error => this.fail(error));
     });
     // Cancellation can precede the caller awaiting initialization.
     this.ready.catch(() => {});
@@ -122,12 +156,34 @@ export class StockfishEngine {
   }
   analyze(chess, options = {}) {
     const generation=this.searchGeneration;
+    // A queued cache key and its eventual UCI command must describe the same
+    // history even if a caller later edits the supplied Chess or options object.
+    options={...options,...(Array.isArray(options.searchMoves)?{searchMoves:[...options.searchMoves]}:{})};
+    if(this.resultCache&&options.searchMode==='depth'&&this.searchIdentity.threads===1){
+      try{
+        const history=chess.history({verbose:true}),snapshot=new Chess(history[0]?.before||chess.fen());
+        for(const move of history)snapshot.move(uciMove(move));
+        chess=snapshot;
+      }catch(error){return Promise.reject(error);}
+    }
     const task=this.searchQueue.catch(()=>{}).then(async()=>{
+      await this.ready;
       if(this.closed || generation!==this.searchGeneration)throw new DOMException('Cancelled','AbortError');
+      const key=this.resultCache&&exactSearchKey({...this.searchIdentity,
+        revision:`${SEARCH_CACHE_REVISION}:${this.executionBuild}`,
+        position:positionCommand(chess),searchMode:options.searchMode,depth:options.depth,
+        multipv:options.multipv??3,searchMoves:options.searchMoves});
+      if(key){
+        try {const cached=this.resultCache.get(key);if(cached)return cached;}
+        catch { /* Cache failures fall back to the same complete cold search. */ }
+      }
       // Reset and search share one queue reservation, so another queued search
       // cannot reset early and then inherit this one's transposition table.
       if(options.searchMode==='depth')await this.reset();
-      return this.search(chess,options);
+      const result=await this.search(chess,options);
+      if(this.closed || generation!==this.searchGeneration)throw new DOMException('Cancelled','AbortError');
+      if(key){try {this.resultCache.set(key,result);}catch { /* Completed evidence survives cache failures. */ }}
+      return result;
     });
     this.searchQueue=task.catch(()=>{});
     return task;

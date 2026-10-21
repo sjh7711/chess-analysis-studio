@@ -80,8 +80,15 @@ export function gameReviewOptions(depth, performance = DEFAULT_PERFORMANCE) {
 }
 
 const fullEngineUrls = new Map();
-export async function workerUrl(id, { signal, threads = 1, onProgress = () => {} } = {}) {
-  const parallel = threads > 1;
+// The shared-memory Lite binary also runs a single search thread. In isolated
+// browsers it avoids the Asyncify instrumentation of the compatibility binary;
+// choosing it does not increase the number of simultaneous search jobs.
+export function useSharedLite(threads=1,isolated=globalThis.crossOriginIsolated,
+  sharedMemory=typeof SharedArrayBuffer==='function') {
+  return threads>1 || Boolean(isolated&&sharedMemory);
+}
+export async function workerUrl(id, { signal, threads = 1, onProgress = () => {}, compatibility = false } = {}) {
+  const parallel = threads > 1 || id !== 'full' && !compatibility && useSharedLite(threads);
   if (id !== 'full') return `${parallel ? ENGINES.lite.parallelWorker : ENGINES.lite.worker}?v=19.0.0`;
   if (fullEngineUrls.has(parallel)) return fullEngineUrls.get(parallel);
   let received = 0;
