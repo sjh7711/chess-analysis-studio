@@ -1,8 +1,9 @@
 import { Chess, parseGame, gameAt, classifyMove, hasMoveReview, assessedMoveResult, MOVE_GRADES, GRADING_BASIS, formatScore, scoreValue, exportPgn } from './chess-core.js';
 import { StockfishEngine } from './engine.js';
-import { reviewMove } from './review.js';
 import { ENGINES, DEFAULT_ENGINE_ID, REVIEW_ENGINE_ID, AUTO_THREAD_LABEL, availableReviewWorkers, automaticThreads, engineId, normalizePerformance, searchOptions, reviewOptions, gameReviewOptions, analysisKey } from './engine-options.js';
 import { BackgroundReview } from './background-review.js';
+import { ReviewWorkerPool } from './review-pool.js';
+import { analyzeForeground } from './foreground-analysis.js';
 import { explorationChart, seedExplorationBase } from './exploration-chart.js';
 import { pieceSvg, pieceSnapshot, pieceTransitions, StepNavigation, capturedPieces, capturedMarkup } from './pieces.js';
 import { BoardAnnotations } from './annotations.js';
@@ -35,8 +36,7 @@ const maxThreads = availableReviewWorkers(logicalCores).at(-1);
 let selectedEngine = DEFAULT_ENGINE_ID, performanceOptions = normalizePerformance({}, maxThreads,logicalCores);
 const state = { game:parseGame(SAMPLE_PGN), index:59, flipped:false, results:new Map(), line:null, editor:null, playing:false, selected:null, mode:null, error:null, tab:'moves', chartMode:'game' };
 const annotations=new BoardAnnotations($('board'),{isFlipped:()=>state.flipped,enabled:()=>!state.editor,toggleButton:$('annotation-mode'),clearButton:$('annotation-clear')});
-let engine = null, engineConfig = '', generation = 0, debounce, toastTimer, pendingPromotion, draggedSquare, suppressClickUntil = 0;
-let deferredAnalysis=null, deferredExplanation=null;
+let analysisPool=null,foregroundAbort=null,generation = 0, debounce, toastTimer, pendingPromotion, draggedSquare, suppressClickUntil = 0;
 const backgroundReview=new BackgroundReview({
   onStart(job){
     completionAlerts.begin(job.id);
@@ -64,17 +64,11 @@ const backgroundReview=new BackgroundReview({
     if(!ownsReview(job))return;
     seedExplorationBase(state.game,state.line,state.results);
     renderResults();persist();
-    if(backgroundReview.active)return;
-    const explanation=deferredExplanation,analysis=deferredAnalysis;
-    deferredExplanation=null;deferredAnalysis=null;
-    if(explanation&&explanation.generation===generation&&state.line===explanation.line&&!state.editor)
-      void deepenExplanation(explanation.context,explanation.kind,explanation.options,explanation.engineKey,explanation.line);
-    else if(analysis&&!state.editor)scheduleAnalysis(false,analysis.force);
   },
 });
 function ownsReview(job){return job.game===state.game&&job.results===state.results;}
 function currentGameReview(){const job=backgroundReview.active;return job&&ownsReview(job)?job:null;}
-function stopGameReview(){deferredAnalysis=null;deferredExplanation=null;return backgroundReview.stop();}
+function stopGameReview(){return backgroundReview.stop();}
 const playback = new PlaybackClock(advancePlayback);
 window.addEventListener('analysis-notice',({detail:{message,test}})=>{
   toast(message);
@@ -149,16 +143,27 @@ function isCached(result) {
   if (result.configKey) return result.configKey === configKey() || result.configKey === configKey('game');
   return false;
 }
-function createEngine(run) {
-  const nextConfig = `${selectedEngine}:${performanceOptions.hash}:1`;
-  if (engine && !engine.closed && engineConfig === nextConfig) return engine;
-  engine?.dispose();
-  engineConfig = nextConfig;
-  return new StockfishEngine(Worker, { engineId:selectedEngine, ...performanceOptions, threads:1, onLoad:percent => {
-    if (engineConfig !== nextConfig) return;
-    $('engine-download').hidden = selectedEngine !== 'full' || percent >= 100;
-    $('engine-download').textContent = `Stockfish 19 다운로드 ${percent}%`;
-  } });
+function sharedEnginePool() {
+  if(!analysisPool)analysisPool=new ReviewWorkerPool({concurrency:performanceOptions.threads,
+    createWorker:()=>new StockfishEngine(Worker,{engineId:REVIEW_ENGINE_ID,hash:performanceOptions.hash,threads:1})});
+  analysisPool.setConcurrency(performanceOptions.threads);
+  return analysisPool;
+}
+function foregroundLease(run,task,{engineId:selected=selectedEngine,hash=performanceOptions.hash}={}) {
+  const request=new AbortController();
+  foregroundAbort=request;
+  return sharedEnginePool().submit({priority:10,signal:request.signal,
+    workerKey:`${selected}:${hash}:1`,
+    createWorker:()=>new StockfishEngine(Worker,{engineId:selected,hash,threads:1,onLoad:percent=>{
+      if(run!==generation)return;
+      $('engine-download').hidden=selected!=='full'||percent>=100;
+      $('engine-download').textContent=`Stockfish 19 다운로드 ${percent}%`;
+    }}),
+    run:async(worker,signal)=>{
+      if(run!==generation)throw new DOMException('Cancelled','AbortError');
+      return task(worker,signal);
+    },
+  }).finally(()=>{if(foregroundAbort===request)foregroundAbort=null;});
 }
 
 function stopJob() {
@@ -166,8 +171,7 @@ function stopJob() {
   if(state.mode==='explanation' && state.line?.explanationSnapshot)state.line.refinementStatus='심층 확인 중단 · 현재 설명을 유지합니다';
   generation++;
   clearTimeout(debounce);
-  deferredAnalysis=null;deferredExplanation=null;
-  engine?.cancel();
+  foregroundAbort?.abort();foregroundAbort=null;
   state.mode = null;
   $('engine-download').hidden = true;
 }
@@ -197,37 +201,33 @@ async function analyzeCurrent(force = false) {
   const move=state.line?state.line.steps[position-1]:state.game.moves[position-1],before=results.get(position-1);
   const needsReview=move && isCached(before) && !hasMoveReview(before,cached,move);
   if (!force && isCached(cached) && !needsReview) { renderAnalysis(); schedulePlayback(); return; }
-  // The review owns its worker budget. Navigation and manual moves stay usable;
-  // a missing foreground evaluation waits instead of cancelling or adding workers.
-  if(backgroundReview.active){deferredAnalysis={force};renderAnalysis();if(state.line)renderStudy();return;}
   stopJob();
   const run = generation;
   const chess = currentChess();
   const index = state.index;
   const line = state.line;
   const cursor = line?.cursor;
-  const options = searchOptions(Number($('depth').value),performanceOptions);
+  // Original-game foreground searches use the same policy as the active review
+  // so a priority result cannot replace its root with a different candidate set.
+  const full=!line&&currentGameReview();
+  const options = full?.options || searchOptions(Number($('depth').value),performanceOptions);
+  const comparisonOptions=full?.comparisonOptions || options;
+  const overviewOptions=full?.options || reviewOptions(Number($('depth').value),performanceOptions);
+  const key=full?.configKey || configKey();
+  const parent=move ? line ? line.position(position-1) : gameAt(state.game,index-1) : null;
   state.mode = 'position';
   state.error = null;
   renderAnalysis();
   if (state.line) renderStudy();
   try {
-    await backgroundReview.drain;
-    if(run!==generation)return;
-    engine = createEngine(run);
-    const reused = !force && isCached(cached);
-    let result = reused ? {...cached} : await engine.analyze(chess, options);
+    const output=await foregroundLease(run,(worker,signal)=>analyzeForeground(worker,{
+      chess,parent,before:results.get(position-1),cached:results.get(position),move,options,comparisonOptions,overviewOptions,overview:!!full?.overview,
+      configKey:key,force,isCached:full?.spec.isCached||isCached,signal,
+    }),full?{engineId:REVIEW_ENGINE_ID,hash:full.hash}:undefined);
     if (run !== generation) return;
-    result.requestedDepth = options.depth;
-    if (!reused) result.configKey = configKey();
-    if (move && isCached(before)) {
-      const root=line ? cloneChess(line.base) : gameAt(state.game,index-1);
-      if (line) for (const step of line.steps.slice(0,position-1)) root.move(step.uci);
-      result=await reviewMove(engine,root,before,result,move,before.overview?reviewOptions(Number($('depth').value),performanceOptions):options);
-      if (run!==generation) return;
-    }
-    if (line) line.results.set(cursor,result);
-    else { state.results.set(index, result); persist(); }
+    if(move&&output.before&&(line||!isCached(results.get(position-1))))results.set(position-1,output.before);
+    results.set(line?cursor:index,output.result);
+    if(!line)persist();
   } catch (error) {
     if (run === generation && error.name !== 'AbortError') { state.error = error.message; toast(error.message, true); }
   } finally {
@@ -252,12 +252,12 @@ async function analyzeGame(restart = false) {
   const game=state.game,results=state.results,key=configKey('game'),hash=performanceOptions.hash,
     concurrency=performanceOptions.threads,overview=performanceOptions.reviewMode!=='precise';
   state.error = null;
-  engine?.dispose();engine=null;engineConfig='';
-  const work=backgroundReview.start({game,results,concurrency,
+  const work=backgroundReview.start({game,results,concurrency,hash,pool:sharedEnginePool(),workerKey:`${REVIEW_ENGINE_ID}:${hash}:1`,
     createEngine:()=>new StockfishEngine(Worker,{engineId:REVIEW_ENGINE_ID,hash,threads:1}),
     isCached:result=>!!result?.terminal||result?.configKey===key&&(!result.overview||overview),
     options:overviewOptions,comparisonOptions:options,configKey:key,overview});
   renderResults();
+  if(state.line&&!state.line.explanationSnapshot&&!state.editor)scheduleAnalysis();
   return work;
 }
 
@@ -462,7 +462,7 @@ function renderAnalysis() {
   const totalTasks=state.game.positions.length+state.game.moves.length;
   const doneTasks=evaluated+Math.max(0,complete-Number(isCached(state.results.get(0))));
   $('progress-text').textContent = evaluated<state.game.positions.length
-    ? `국면 분석 · ${evaluated} / ${state.game.positions.length} · ${full?.concurrency||performanceOptions.threads}개 작업${state.line?' · 탐색 중에도 계속':''}`
+    ? `국면 분석 · ${evaluated} / ${state.game.positions.length} · 최대 ${performanceOptions.threads}개 작업${state.line?' · 자유 탐색 우선':''}`
     : `수 검토 · ${Math.max(0,complete-1)} / ${state.game.moves.length}`;
   const percent = Math.round(doneTasks/totalTasks*100);
   $('progress-percent').textContent = `${percent}%`;
@@ -595,20 +595,12 @@ function startInsight(kind,scope='core') {
 }
 
 async function deepenExplanation(context,kind,options,engineKey,line) {
-  if(backgroundReview.active){
-    deferredExplanation={context,kind,options,engineKey,line,generation};
-    line.refinementStatus='기보 분석 완료 후 심층 확인 · 현재 장면은 유지됩니다';
-    renderAnalysis();renderStudy();return;
-  }
   const run=generation;
   line.refinementStatus='심층 확인 중 · 현재 장면은 유지됩니다';
   state.mode='explanation';
   renderAnalysis();renderStudy();
   try {
-    await backgroundReview.drain;
-    if(run!==generation)return;
-    engine=createEngine(run);
-    const result=await explanationSearch.refine(engine,context,kind,options,engineKey);
+    const result=await foregroundLease(run,(worker)=>explanationSearch.refine(worker,context,kind,options,engineKey));
     if (run!==generation || state.line!==line || state.game!==context.game) return;
     const insight=refineInsight(context,kind,result);
     if (insight) {
@@ -680,10 +672,10 @@ function renderChart() {
   $('chart-start').textContent = branch ? series.originIndex>0?'원본 → 탐색':'탐색 시작' : '시작';
   $('chart-last').textContent = branch ? `${branch.steps.length}번 이동` : state.game.moves.length ? `${state.game.moves.length}번 이동` : '현재 국면';
   $('chart-status').textContent = branch?.explanationSnapshot ? `설명 수순 · 근거 깊이 ${branch.sourceDepth}`
-    : `${evaluationSide()} 기준 · ${state.editor ? '배치 편집 중' : currentGameReview() ? branch ? '원본 기보 분석 중 · 탐색 평가 대기' : '전체 대국 분석 중' : results.size===count ? '분석 완료' : `${results.size}/${count} 국면 분석`}`;
+    : `${evaluationSide()} 기준 · ${state.editor ? '배치 편집 중' : currentGameReview() ? branch ? '자유 탐색 우선 · 원본 기보 분석도 계속' : '전체 대국 분석 중' : results.size===count ? '분석 완료' : `${results.size}/${count} 국면 분석`}`;
   $('chart-status').title = evaluationHint();
   $('chart-empty').textContent=branch
-    ? currentGameReview()?'원본 기보 분석은 계속됩니다. 탐색 평가는 완료 후 이어집니다.':'현재 탐색 위치를 분석하면 그래프에 표시됩니다.'
+    ? currentGameReview()?'다음으로 비는 작업에서 자유 탐색을 먼저 분석합니다.':'현재 탐색 위치를 분석하면 그래프에 표시됩니다.'
     : '아직 분석되지 않은 국면입니다.';
   $('chart-top-label').textContent = `${evaluationSide()} 우세`;
   $('chart-bottom-label').textContent = `${state.flipped ? '백' : '흑'} 우세`;
@@ -932,7 +924,7 @@ function renderStudy() {
     : state.playing
     ? state.line.cursor===0 && pieceMotions.size ? '재생 시작 위치로 이동 중…' : playback.phase==='reading' ? `분석 완료 · ${seconds}초 확인 후 다음 수` : `현재 수 분석 중 · 완료 후 ${seconds}초간 결과 표시`
     : state.error ? '현재 국면을 분석하지 못했습니다. 다시 분석해 주세요.'
-    : currentGameReview()&&!isCached(currentResult()) ? '기보 분석은 계속됩니다 · 완료 후 현재 탐색 위치를 분석합니다.'
+    : currentGameReview()&&!isCached(currentResult()) ? '자유 탐색을 우선 분석합니다 · 원본 기보 분석도 계속됩니다.'
     : state.mode || !isCached(currentResult()) ? '현재 국면 분석 중 · 자동으로 재생하지 않습니다.'
     : ended && line.steps.length ? line.reviewScope==='core' ? line.fullLength>line.steps.length ? '핵심 장면에서 멈췄습니다. 후속 수순은 아래의 전체 예상 수순을 선택하세요.' : '핵심 장면에서 멈췄습니다. 저장된 후속 수순은 없습니다.' : '선택한 수순의 끝입니다. 다시 재생하거나 원본으로 돌아갈 수 있습니다.'
     : line.steps.length ? '분석 완료 · 재생을 누르면 수순이 진행됩니다.' : '분석 완료 · 기물을 움직여 탐색하세요.';
@@ -1061,7 +1053,7 @@ $('engine-settings-open').onclick = () => {
   $('settings-threads').innerHTML=`<option value="auto">${AUTO_THREAD_LABEL} · ${automatic}개 작업</option>${availableReviewWorkers(logicalCores).map(count=>`<option value="${count}">수동 · ${count}개 작업</option>`).join('')}`;
   $('settings-threads').value = performanceOptions.threadMode==='auto'?'auto':String(performanceOptions.threads);
   $('threads-note').textContent = maxThreads > 1
-    ? `논리 스레드 ${logicalCores}개 기준 자동 ${automatic}개 작업 · 최대 ${maxThreads}개(50% 이하). 같은 깊이의 서로 다른 국면을 나누어 분석합니다. 현재 국면·전구는 1개 작업으로 분석합니다. 실제 CPU 점유율을 제한하는 기능은 아닙니다.`
+    ? `논리 스레드 ${logicalCores}개 기준 자동 ${automatic}개 작업 · 최대 ${maxThreads}개(50% 이하). 원본 기보·자유 탐색·전구가 이 한도를 함께 사용합니다. 다음으로 비는 작업은 자유 탐색·전구에 우선 배정합니다. 실제 CPU 점유율을 제한하는 기능은 아닙니다.`
     : logicalCores===1?'단일 스레드 기기는 분석에 필요한 최소 1개 작업을 사용합니다.':'이 기기에서는 논리 스레드의 50% 이하인 1개 작업으로 분석합니다.';
   $('engine-settings-dialog').showModal();
 };
@@ -1077,14 +1069,11 @@ $('engine-settings-form').onsubmit = event => {
   const schedulingOnly=!changed && (nextPerformance.threads!==performanceOptions.threads
     ||nextPerformance.threadMode!==performanceOptions.threadMode);
   const explanationOnly=!changed && nextPerformance.movetime!==performanceOptions.movetime;
-  const reviewing=!!currentGameReview(),pendingAnalysis=deferredAnalysis,pendingExplanation=deferredExplanation;
+  const reviewing=!!currentGameReview();
   $('engine-settings-dialog').close();
   if(changed)stopGameReview();
-  pausePlayback(); stopJob();
-  if(!changed){
-    deferredAnalysis=pendingAnalysis;
-    if(pendingExplanation)deferredExplanation={...pendingExplanation,generation};
-  }
+  pausePlayback();
+  if(changed||(!schedulingOnly&&!explanationOnly))stopJob();
   if(state.line?.explanationSnapshot&&!schedulingOnly&&!explanationOnly){
     // Applying settings analyzes the displayed scene, including a bulb step.
     // Detach its frozen explanation without navigating back to the game move.
@@ -1093,16 +1082,17 @@ $('engine-settings-form').onsubmit = event => {
     coachExpanded=null;
   }
   selectedEngine=nextEngine;performanceOptions=nextPerformance;$('depth').value=nextDepth;
+  if(analysisPool)analysisPool.setConcurrency(nextPerformance.threads);
+  if(currentGameReview())currentGameReview().concurrency=nextPerformance.threads;
   if(changed){state.results.clear();state.line?.results.clear();}
   state.error=null;
   if(!schedulingOnly&&!explanationOnly)insightContext=null;
   renderAll();persist();
   if(changed&&reviewing){
     void analyzeGame(true);
-    if(state.line)deferredAnalysis={force:true};
     toast('새 설정으로 기보 전체를 분석합니다. 현재 탐색 위치는 유지합니다.');
   }
-  else if(schedulingOnly)toast(reviewing?'현재 기보는 시작한 작업 수로 끝까지 분석합니다. 변경한 작업 수는 다음 분석부터 적용합니다.':'동시 작업 수를 적용했습니다. 기존 분석 결과를 유지합니다.');
+  else if(schedulingOnly)toast('동시 작업 한도를 적용했습니다. 진행 중인 계산을 마친 뒤 새 한도로 배정하며, 자유 탐색을 우선합니다.');
   else if(explanationOnly)toast('전구 심층 확인 시간을 적용했습니다. 기존 판정을 유지합니다.');
   else {scheduleAnalysis(false,true);toast('설정을 적용했습니다. 현재 국면을 새로 분석합니다.');}
 };
@@ -1308,7 +1298,7 @@ document.addEventListener('keydown', event => {
   const action = {ArrowLeft:'prev',ArrowRight:'next',Home:'first',End:'last',f:'flip',F:'flip'}[event.key];
   if (action) { event.preventDefault(); $(action).click(); }
 });
-window.addEventListener('pagehide', () => { pausePlayback();stopGameReview();persist();engine?.dispose(); });
+window.addEventListener('pagehide', () => { pausePlayback();stopJob();stopGameReview();persist();void analysisPool?.dispose(); });
 document.addEventListener('visibilitychange',()=>{if(document.hidden){pausePlayback();renderStudy();}});
 
 // Reserve the move list itself, in addition to the chart and playback controls.

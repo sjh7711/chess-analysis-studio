@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { parseGame, gameAt, hasMoveReview, positionCommand, uciMove } from '../src/chess-core.js';
 import { reviewGame } from '../src/game-review.js';
+import { ReviewWorkerPool } from '../src/review-pool.js';
 
 const game = parseGame('1. e4 e5 2. Nf3 Nc6 *');
 const options = { depth: 10, movetime: 222, multipv: 2 };
@@ -211,4 +212,101 @@ test('a failed fixed-depth confidence search does not publish a reviewed move or
   assert.deepEqual(events.map(event=>[event.index,event.phase]),[[0,'position'],[1,'position']]);
   assert.ok(events.every(event=>event.result.moveReview===undefined),'an incomplete confidence job cannot publish a grade input');
   assert.equal(saved.size,0);assert.equal(disposed,1);
+});
+
+test('interactive work takes the next shared slot while the original review finishes with unchanged roots and grades', async () => {
+  const baseline = fakeEngines();
+  const expected = await reviewGame(game, { concurrency: 1, createEngine: baseline.createEngine,
+    options, comparisonOptions, configKey });
+  const gates = game.positions.map(deferred), foregroundGate = deferred(), events = [];
+  const fake = fakeEngines({ gates });
+  const pool = new ReviewWorkerPool({ concurrency: 2, createWorker: fake.createEngine });
+  try {
+    const pending = reviewGame(game, { pool, workerKey: 'review-lite', createEngine: fake.createEngine,
+      options, comparisonOptions, configKey,
+      onResult: (_, index, phase) => events.push([index, phase]),
+    });
+    await turn();
+    assert.deepEqual(fake.calls.map(call => call.index), [0, 1]);
+    let foregroundStarted = false, foregroundFinished = false;
+    const foreground = pool.submit({ priority: 10, workerKey: 'review-lite', createWorker: fake.createEngine,
+      run: async worker => {
+        await worker.reset(); foregroundStarted = true;
+        await foregroundGate.promise; foregroundFinished = true;
+        return 'exploration completed';
+      },
+    });
+    gates[0].resolve(); await turn();
+    assert.equal(foregroundStarted, true, 'the next free slot serves exploration before another original position');
+    assert.equal(foregroundFinished, false);
+    assert.deepEqual(fake.calls.map(call => call.index), [0, 1], 'no third task runs outside the configured two slots');
+    assert.equal(events.filter(([, phase]) => phase === 'position').length, 1);
+    assert.equal(fake.workers.length, 2);
+    foregroundGate.resolve();
+    assert.equal(await foreground, 'exploration completed');
+    gates.forEach(gate => gate.resolve());
+    const actual = await pending;
+    assert.deepEqual(actual, expected, 'foreground contention changes neither source evaluations nor move classifications');
+    assert.ok(fake.workers.every(worker => worker.disposed === 0 && worker.cancelled === 0),
+      'finishing a game does not tear down application-owned shared engines');
+    assert.equal(await pool.submit({ priority: 10, workerKey: 'review-lite', createWorker: fake.createEngine,
+      run: async () => 'still available' }), 'still available');
+  } finally {
+    foregroundGate.resolve(); gates.forEach(gate => gate.resolve());
+    await pool.dispose();
+  }
+  assert.ok(fake.workers.every(worker => worker.disposed === 1));
+});
+
+test('shared review forwards its cancellation and worker configuration to both phases without taking pool ownership', async () => {
+  const controller = new AbortController(), fake = fakeEngines(), phases = [];
+  let disposed = 0;
+  const pool = {
+    async map(items, settings) {
+      assert.equal(settings.signal, controller.signal);
+      assert.equal(settings.priority, 0);
+      assert.equal(settings.workerKey, 'lite:64');
+      assert.equal(settings.createWorker, fake.createEngine);
+      assert.equal(settings.isolateFailures, true);
+      phases.push(items);
+      const worker = fake.createEngine(0), values = [];
+      for (const [offset, item] of items.entries()) {
+        const result = await settings.run(worker, item, offset, controller.signal);
+        await settings.onResult(result, offset, item); values.push(result);
+      }
+      return values;
+    },
+    async dispose() { disposed++; },
+  };
+  const outcome = await reviewGame(game, { pool, workerKey: 'lite:64', signal: controller.signal,
+    createEngine: fake.createEngine, options, comparisonOptions, configKey });
+  assert.equal(outcome.analyzed, game.positions.length);
+  assert.equal(outcome.reviewed, game.moves.length);
+  assert.deepEqual(phases, [[0, 1, 2, 3, 4], [1, 2, 3, 4]]);
+  assert.equal(disposed, 0);
+});
+
+test('cancelling a shared original review leaves queued foreground work and the application pool usable', async () => {
+  const controller = new AbortController(), gates = game.positions.map(deferred), events = [];
+  const fake = fakeEngines({ gates });
+  const pool = new ReviewWorkerPool({ concurrency: 2, createWorker: fake.createEngine });
+  try {
+    const pending = reviewGame(game, { pool, workerKey: 'review-lite', signal: controller.signal,
+      createEngine: fake.createEngine, options, comparisonOptions, configKey,
+      onResult: (_, index, phase) => events.push([index, phase]),
+    });
+    const rejected = assert.rejects(pending, { name: 'AbortError' });
+    await turn();
+    const foreground = pool.submit({ priority: 10, workerKey: 'review-lite', createWorker: fake.createEngine,
+      run: async worker => { await worker.reset(); return 'independent exploration'; },
+    });
+    controller.abort(); gates.forEach(gate => gate.resolve());
+    await rejected;
+    assert.equal(await foreground, 'independent exploration');
+    assert.deepEqual(events, [], 'cancelled original-game jobs do not publish stale roots');
+    assert.equal(await pool.submit({ priority: 10, workerKey: 'review-lite', createWorker: fake.createEngine,
+      run: async () => 'usable after cancellation' }), 'usable after cancellation');
+  } finally {
+    gates.forEach(gate => gate.resolve()); await pool.dispose();
+  }
 });
