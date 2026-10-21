@@ -224,7 +224,9 @@ async function analyzeGame(restart = false) {
       outcome=await reviewGame(game,{
         concurrency:performanceOptions.threads,
         createEngine:()=>new StockfishEngine(Worker,{engineId:REVIEW_ENGINE_ID,hash:performanceOptions.hash,threads:1}),
-        signal:abort.signal,results:state.results,isCached,options:overviewOptions,comparisonOptions:options,
+        signal:abort.signal,results:state.results,
+        isCached:result=>!!result?.terminal || result?.configKey===configKey('game')&&isCached(result),
+        options:overviewOptions,comparisonOptions:options,
         configKey:configKey('game'),overview:performanceOptions.reviewMode!=='precise',
         onResult:(result,index)=>{
           if(run!==generation||game!==state.game)return;
@@ -1029,8 +1031,8 @@ $('engine-settings-open').onclick = () => {
   $('settings-threads').innerHTML=`<option value="auto">${AUTO_THREAD_LABEL} · ${automatic}개 작업</option>${availableReviewWorkers(logicalCores).map(count=>`<option value="${count}">수동 · ${count}개 작업</option>`).join('')}`;
   $('settings-threads').value = performanceOptions.threadMode==='auto'?'auto':String(performanceOptions.threads);
   $('threads-note').textContent = maxThreads > 1
-    ? `논리 코어 ${logicalCores}개 기준 자동 ${automatic}개 작업 · 최대 ${maxThreads}개. 전체 대국의 서로 다른 국면을 나누어 분석합니다. 현재 국면·전구는 1개 작업으로 분석합니다. 실제 CPU 점유율 40%를 제한하는 기능은 아닙니다.`
-    : '이 기기에서는 1개 작업으로 분석합니다.';
+    ? `논리 스레드 ${logicalCores}개 기준 자동 ${automatic}개 작업 · 최대 ${maxThreads}개(50% 이하). 같은 깊이의 서로 다른 국면을 나누어 분석합니다. 현재 국면·전구는 1개 작업으로 분석합니다. 실제 CPU 점유율을 제한하는 기능은 아닙니다.`
+    : logicalCores===1?'단일 스레드 기기는 분석에 필요한 최소 1개 작업을 사용합니다.':'이 기기에서는 논리 스레드의 50% 이하인 1개 작업으로 분석합니다.';
   $('engine-settings-dialog').showModal();
 };
 $('engine-settings-close').onclick = () => $('engine-settings-dialog').close();
@@ -1042,9 +1044,12 @@ $('engine-settings-form').onsubmit = event => {
   const threadChoice=$('settings-threads').value;
   const nextPerformance = normalizePerformance({reviewMode:$('settings-review').value,movetime:Number($('settings-time').value),multipv:Number($('settings-lines').value),hash:Number($('settings-hash').value),threadMode:threadChoice==='auto'?'auto':'manual',threads:Number(threadChoice)}, maxThreads,logicalCores);
   const changed = configKey() !== analysisKey(nextEngine,nextDepth,nextPerformance) || nextPerformance.reviewMode !== performanceOptions.reviewMode;
+  const schedulingOnly=!changed && (nextPerformance.threads!==performanceOptions.threads
+    ||nextPerformance.threadMode!==performanceOptions.threadMode);
+  const explanationOnly=!changed && nextPerformance.movetime!==performanceOptions.movetime;
   $('engine-settings-dialog').close();
   pausePlayback(); stopJob();
-  if(state.line?.explanationSnapshot){
+  if(state.line?.explanationSnapshot&&!schedulingOnly&&!explanationOnly){
     // Applying settings analyzes the displayed scene, including a bulb step.
     // Detach its frozen explanation without navigating back to the game move.
     state.line=new AnalysisLine(currentChess());
@@ -1054,9 +1059,11 @@ $('engine-settings-form').onsubmit = event => {
   selectedEngine=nextEngine;performanceOptions=nextPerformance;$('depth').value=nextDepth;
   if(changed){state.results.clear();state.line?.results.clear();}
   state.error=null;
-  insightContext=null;
-  renderAll();persist();scheduleAnalysis(false,true);
-  toast('설정을 적용했습니다. 현재 국면을 새로 분석합니다.');
+  if(!schedulingOnly&&!explanationOnly)insightContext=null;
+  renderAll();persist();
+  if(schedulingOnly)toast('동시 작업 수를 적용했습니다. 기존 분석 결과를 유지합니다.');
+  else if(explanationOnly)toast('전구 심층 확인 시간을 적용했습니다. 기존 판정을 유지합니다.');
+  else {scheduleAnalysis(false,true);toast('설정을 적용했습니다. 현재 국면을 새로 분석합니다.');}
 };
 function chartNavigate(index,options) { if (state.editor) return; if (state.chartMode==='line' && state.line) seekLine(index,false,options); else navigate(index,options); }
 for(const mode of ['game','line']) $('chart-'+mode).onclick=()=>{if(mode==='line'&&!state.line)return;state.chartMode=mode;renderChart();};

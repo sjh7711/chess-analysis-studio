@@ -232,3 +232,81 @@ test('equal root FENs with different real repetition histories cannot reuse conf
   assert.equal(classifyMove(first.before,repaired,first.move).key,'excellent');
   assert.equal(classifyMove(second.before,secondAfter,second.move).key,'best','the independent valid history retains its evidence');
 });
+
+function depthFixture(settings={}) {
+  const item=fixture(settings);
+  item.before.searchMode='depth';item.after.searchMode='depth';
+  item.options={...item.options,searchMode:'depth'};
+  return item;
+}
+
+async function reviewedDepth(item,changes={}) {
+  const value={...confirmation(item,changes),searchMode:'depth'},calls=[];
+  const engine={async reset(){calls.push({type:'reset'});},async analyze(chess,settings){
+    calls.push({type:'analyze',history:positionCommand(chess),settings:structuredClone(settings)});
+    return structuredClone(value);
+  }};
+  return {after:await reviewMove(engine,item.chess,item.before,item.after,item.move,item.options),calls,value};
+}
+
+test('fixed-depth ranking completes the root depth without a time budget and binds immutable depth evidence',async()=>{
+  for(const black of [false,true]) {
+    const item=depthFixture({black,history:!black}),original=snapshot(item),{after,calls,value}=await reviewedDepth(item);
+    const record=after.moveReview.rankingReview;
+    assert.equal(snapshot(item),original);
+    assert.deepEqual(calls.map(call=>call.type),['reset','analyze']);
+    assert.deepEqual(calls[1].settings,{depth:item.before.depth,multipv:2,searchMode:'depth'});
+    assert.equal(calls[1].history,positionCommand(item.chess));
+    assert.equal(record.movetime,null);assert.equal(record.searchMode,'depth');assert.equal(record.status,'complete');
+    assert.equal(record.requestedDepth,item.before.depth);assert.equal(record.result.searchMode,'depth');
+    assert.deepEqual(record.result,value);assert.equal(hasRankingReview(item.before,after,item.move,item.chess),true);
+    assert.equal(classifyMove(item.before,after,item.move).key,'best');
+    assert.equal(after.score,item.after.score);assert.equal(after.lines,item.after.lines);
+    assert.equal(after.moveReview.score,item.after.moveReview.score);assert.equal(after.moveReview.pv,item.after.moveReview.pv);
+    value.lines[0].pv.push('a9a8');
+    assert.equal(hasRankingReview(item.before,after,item.move,item.chess),true,'stored evidence is detached from a mutable worker response');
+  }
+});
+
+test('fixed-depth ranking propagates failures and rejects incomplete, foreign-policy, illegal or inconsistent results',async()=>{
+  const cases=[
+    value=>{throw new Error('confidence worker unavailable');},
+    value=>{value.depth--;for(const line of value.lines)line.depth--;},
+    value=>{value.multipvComplete=false;},
+    value=>{delete value.searchMode;},
+    value=>{value.searchMode='time';},
+    value=>{value.lines[0].pv.push('a9a8');},
+    value=>{value.lines[0].score.value++;},
+    value=>{value.bestmove='h1h8';},
+  ];
+  for(const mutate of cases) {
+    const item=depthFixture(),original=snapshot(item),value={...confirmation(item),searchMode:'depth'};
+    const engine={async reset(){},async analyze(chess,settings){
+      assert.equal(settings.searchMode,'depth');assert.equal('movetime' in settings,false);
+      mutate(value);return value;
+    }};
+    await assert.rejects(reviewMove(engine,item.chess,item.before,item.after,item.move,item.options));
+    assert.equal(snapshot(item),original,'a failed optional search cannot mutate or attach a reusable attempted proof');
+    assert.equal(item.after.moveReview.rankingReview,undefined);
+    assert.equal(needsRankingReview(item.before,item.after,item.move,item.chess),true);
+  }
+});
+
+test('fixed-depth ranking metadata cannot reuse timed or incomplete proof bindings',async()=>{
+  const mutations=[
+    record=>{record.movetime=1200;},record=>{record.movetime=0;},record=>{delete record.movetime;},
+    record=>{delete record.searchMode;},record=>{delete record.result.searchMode;},
+    record=>{record.status='unverified';record.result=null;},
+    record=>{record.status='depth-limited';record.result.depth--;for(const line of record.result.lines)line.depth--;},
+  ];
+  for(const mutate of mutations) {
+    const item=depthFixture(),{after}=await reviewedDepth(item);
+    assert.equal(hasRankingReview(item.before,after,item.move,item.chess),true);
+    mutate(after.moveReview.rankingReview);
+    assert.equal(hasRankingReview(item.before,after,item.move,item.chess),false);
+    assert.equal(classifyMove(item.before,after,item.move).key,'excellent');
+  }
+  const item=depthFixture(),{after}=await reviewedDepth(item);
+  delete item.before.searchMode;
+  assert.equal(hasRankingReview(item.before,after,item.move,item.chess),false,'the proof is bound to the root search policy');
+});

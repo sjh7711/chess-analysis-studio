@@ -196,6 +196,12 @@ function rankingEligible(before,after,move) {
     && rankingPv(move.before,first.pv) && rankingPv(move.before,review.pv));
 }
 
+function confidenceSearchBinding(record,before) {
+  if(before.searchMode==='depth')return record.searchMode==='depth' && record.movetime===null
+    && record.status==='complete' && record.result?.searchMode==='depth'
+    && record.result.depth===record.requestedDepth;
+  return !record.searchMode && Number.isFinite(record.movetime) && record.movetime>0 && record.movetime<=1200;
+}
 function rankingBinding(before,after,move,chess) {
   const review=after?.moveReview,record=review?.rankingReview;
   return !!(rankingEligible(before,after,move) && record?.version===1 && record.scope==='unrestricted-root'
@@ -205,7 +211,7 @@ function rankingBinding(before,after,move,chess) {
     && record.playedDepth===review.depth && record.playedSource===review.source
     && Array.isArray(record.playedPv) && record.playedPv.length===review.pv.length && record.playedPv.every((uci,index)=>uci===review.pv[index])
     && record.requestedDepth===before.depth && record.requestedMultipv===Math.min(3,before.lines.length)
-    && Number.isFinite(record.movetime) && record.movetime>0 && record.movetime<=1200
+    && confidenceSearchBinding(record,before)
     && record.searchMoves===null && ['complete','depth-limited','unverified'].includes(record.status)
     && rankingRoot(record) && sameRankingHistory(record,chess));
 }
@@ -318,7 +324,7 @@ function mateReviewValidation(before,after,move) {
       && record.playedDepth===review.depth && record.playedSource===review.source && sameScore(record.playedScore,review.score)
       && samePv(record.playedPv,review.pv) && record.requestedDepth===Math.min(22,before.depth+4)
       && record.minimumDepth===before.depth+2 && record.requestedMultipv===1
-      && samePv(record.searchMoves,[uciMove(move)]) && Number.isFinite(record.movetime) && record.movetime>0 && record.movetime<=1200
+      && samePv(record.searchMoves,[uciMove(move)]) && confidenceSearchBinding(record,before)
       && ['complete','depth-limited','unverified'].includes(record.status) && root && mateReviewEligible(before,after,move,root)) {
       history=root.history({verbose:true});
       if(record.status==='unverified')valid=record.result===null;
@@ -522,8 +528,8 @@ const rootEvidenceCache=new WeakMap();
 function gradingEvidenceSignature(before,after,move) {
   const review=after?.moveReview;
   return JSON.stringify({move:[move.before,move.after,uciMove(move),move.color,move.piece,move.captured,move.promotion],
-    before:[before.score,before.depth,before.bestmove,before.configKey,before.multipvComplete,before.lines],
-    child:[after.score,after.depth,after.bestmove,after.configKey,after.multipvComplete,after.lines],
+    before:[before.score,before.depth,before.bestmove,before.configKey,before.searchMode,before.requestedDepth,before.multipvComplete,before.lines],
+    child:[after.score,after.depth,after.bestmove,after.configKey,after.searchMode,after.requestedDepth,after.multipvComplete,after.lines],
     review:review&&[review.version,review.fen,review.uci,review.configKey,review.beforeScore,review.beforeDepth,
       review.beforeBestmove,review.score,review.depth,review.pv,review.source,review.rankingReview,review.mateReview]});
 }

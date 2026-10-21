@@ -1,6 +1,18 @@
 import { Chess, expectedPoints, hasMoveReview, hasRankingReview, needsRankingReview, hasMateReview, needsMateReview, sacrificeCandidates, scoreValue, uciMove } from './chess-core.js';
 import { isBookMove } from './opening-book.js';
 
+const depthMode=options=>options.searchMode==='depth';
+function confidenceOptions(options,overrides){
+  const settings={...options,...overrides};
+  if(depthMode(options))delete settings.movetime;
+  return settings;
+}
+function completeConfidence(result,options,depth){
+  if(depthMode(options)&&(!result.multipvComplete||result.depth!==depth||result.searchMode!=='depth'))
+    throw new Error('추가 검증의 설정 깊이를 완료하지 못했습니다. 다시 분석해 주세요.');
+  return result;
+}
+
 function legalBranch(fen,line,captures) {
   if (!line?.pv?.length || !captures.includes(line.pv[0]) || !['cp','mate'].includes(line.score?.type)
     || !Number.isFinite(line.score.value) || !Number.isInteger(line.depth) || line.depth<1) return false;
@@ -43,10 +55,11 @@ async function reviewSacrifice(engine,chess,before,after,move,options) {
         if (!line && engine?.analyze) {
           source='search';
           const movetime=Math.min(500,Number.isFinite(options.movetime)&&options.movetime>0?options.movetime:500);
-          const result=await engine.analyze(position,{...options,depth:requestedDepth,movetime,multipv:1,searchMoves:captures});
+          const result=completeConfidence(await engine.analyze(position,confidenceOptions(options,{depth:requestedDepth,movetime,multipv:1,searchMoves:captures})),options,requestedDepth);
           complete=Boolean(result.multipvComplete);
           line=result.lines?.find(item=>item.pv?.[0]===result.bestmove && item.depth===result.depth
             && legalBranch(move.after,item,captures));
+          if(depthMode(options)&&!line)throw new Error('희생 검증의 수순을 확인하지 못했습니다. 다시 분석해 주세요.');
         }
         if (line) {
           const verified=complete && line.depth>=requestedDepth;
@@ -62,29 +75,31 @@ async function reviewSacrifice(engine,chess,before,after,move,options) {
 
 async function reviewRanking(engine,chess,before,after,move,options) {
   if(!needsRankingReview(before,after,move,chess) || !engine?.analyze)return after;
-  const review=after.moveReview,movetime=Math.min(1200,Number.isFinite(options.movetime)&&options.movetime>0?options.movetime:1200);
+  const review=after.moveReview,movetime=depthMode(options)?null:Math.min(1200,Number.isFinite(options.movetime)&&options.movetime>0?options.movetime:1200);
   const history=chess.history({verbose:true});
   const evidence={version:1,scope:'unrestricted-root',fen:move.before,afterFen:move.after,uci:uciMove(move),configKey:before.configKey,
     startFen:history[0]?.before||chess.fen(),historyMoves:history.map(uciMove),
     beforeScore:{...before.score},beforeDepth:before.depth,beforeBestmove:before.bestmove,
     playedScore:{...review.score},playedDepth:review.depth,playedPv:[...review.pv],playedSource:review.source,
-    requestedDepth:before.depth,requestedMultipv:Math.min(3,before.lines.length),movetime,searchMoves:null,status:'unverified',result:null};
+    requestedDepth:before.depth,requestedMultipv:Math.min(3,before.lines.length),movetime,searchMoves:null,status:'unverified',result:null,
+    ...(depthMode(options)?{searchMode:'depth'}:{})};
   try {
     // Independent one-root and MultiPV searches can disagree even at the same
     // depth. Recheck all legal roots using the original root's candidate count,
     // without warming this confirmation with the played-only search's table.
     await engine.reset?.();
-    const settings={...options,depth:evidence.requestedDepth,movetime,multipv:evidence.requestedMultipv};
+    const settings=confidenceOptions(options,{depth:evidence.requestedDepth,movetime,multipv:evidence.requestedMultipv});
     delete settings.searchMoves;
-    const result=await engine.analyze(chess,settings);
+    const result=completeConfidence(await engine.analyze(chess,settings),options,evidence.requestedDepth);
     evidence.result={score:result.score&&{...result.score},depth:result.depth,bestmove:result.bestmove,
-      engineBestmove:result.engineBestmove,multipvComplete:result.multipvComplete,
+      engineBestmove:result.engineBestmove,multipvComplete:result.multipvComplete,...(result.searchMode?{searchMode:result.searchMode}:{}),
       lines:Array.isArray(result.lines)?result.lines.map(line=>({...line,score:line.score&&{...line.score},pv:Array.isArray(line.pv)?[...line.pv]:line.pv})):[]};
     evidence.status=result.depth===before.depth?'complete':'depth-limited';
     const enriched={...after,moveReview:{...review,rankingReview:evidence}};
     if(hasRankingReview(before,enriched,move,chess))return enriched;
+    if(depthMode(options))throw new Error('후보 순위 검증의 근거가 일치하지 않습니다. 다시 분석해 주세요.');
   } catch(error) {
-    if(error.name==='AbortError')throw error;
+    if(error.name==='AbortError'||depthMode(options))throw error;
     // Optional confidence checks may fail without discarding a sound primary
     // review. A bound attempted check is cached; it is never best-move proof.
   }
@@ -101,22 +116,23 @@ async function reviewMate(engine,chess,before,after,move,options) {
     beforeScore:{...before.score},beforeDepth:before.depth,beforeBestmove:before.bestmove,beforePv:[...before.lines.find(line=>line.multipv===1).pv],
     childScore:{...after.score},childDepth:after.depth,childBestmove:after.bestmove,childPv:[...after.lines.find(line=>line.multipv===1).pv],
     playedScore:{...review.score},playedDepth:review.depth,playedPv:[...review.pv],playedSource:review.source,
-    requestedDepth,minimumDepth,requestedMultipv:1,movetime:Math.min(1200,Number.isFinite(options.movetime)&&options.movetime>0?options.movetime:1200),
-    searchMoves:[uciMove(move)],status:'unverified',result:null};
+    requestedDepth,minimumDepth,requestedMultipv:1,movetime:depthMode(options)?null:Math.min(1200,Number.isFinite(options.movetime)&&options.movetime>0?options.movetime:1200),
+    searchMoves:[uciMove(move)],status:'unverified',result:null,...(depthMode(options)?{searchMode:'depth'}:{})};
   try {
     // A completed child can already see a forced mate while the shallower
     // played-root search still emits centipawns. Verify that single root at a
     // greater completed depth, leaving every primary score and PV intact.
     await engine.reset?.();
-    const result=await engine.analyze(chess,{...options,depth:requestedDepth,movetime:evidence.movetime,multipv:1,searchMoves:[uciMove(move)]});
+    const result=completeConfidence(await engine.analyze(chess,confidenceOptions(options,{depth:requestedDepth,movetime:evidence.movetime,multipv:1,searchMoves:[uciMove(move)]})),options,requestedDepth);
     evidence.result={score:result.score&&{...result.score},depth:result.depth,bestmove:result.bestmove,
-      engineBestmove:result.engineBestmove,multipvComplete:result.multipvComplete,
+      engineBestmove:result.engineBestmove,multipvComplete:result.multipvComplete,...(result.searchMode?{searchMode:result.searchMode}:{}),
       lines:Array.isArray(result.lines)?result.lines.map(line=>({...line,score:line.score&&{...line.score},pv:Array.isArray(line.pv)?[...line.pv]:line.pv})):[]};
     evidence.status=result.multipvComplete===true?(result.depth>=minimumDepth?'complete':'depth-limited'):'unverified';
     const enriched={...after,moveReview:{...review,mateReview:evidence}};
     if(hasMateReview(before,enriched,move,chess))return enriched;
+    if(depthMode(options))throw new Error('메이트 검증의 근거가 일치하지 않습니다. 다시 분석해 주세요.');
   } catch(error) {
-    if(error?.name==='AbortError')throw error;
+    if(error?.name==='AbortError'||depthMode(options))throw error;
   }
   // Cache a bound failed attempt without treating it as proof or retrying on
   // every render. Aborted work propagates above and does not become a cache.

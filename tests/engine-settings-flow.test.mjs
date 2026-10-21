@@ -3,11 +3,11 @@ import assert from 'node:assert/strict';
 import {StockfishEngine} from '../src/engine.js';
 import {Chess,parseGame,uciMove,hasMoveReview} from '../src/chess-core.js';
 import {reviewGame} from '../src/game-review.js';
-import {normalizePerformance,searchOptions,gameReviewOptions,analysisKey} from '../src/engine-options.js';
+import {availableReviewWorkers,normalizePerformance,searchOptions,gameReviewOptions,analysisKey} from '../src/engine-options.js';
 
 const game=parseGame('1. a3 h6 *');
 const turn=()=>new Promise(setImmediate);
-function protocol({hold=false,completedDepth=13}={}) {
+function protocol({hold=false,completedDepth=Infinity}={}) {
   const workers=[],engines=[];
   class Worker {
     constructor(url){this.url=url;this.commands=[];this.terminated=0;workers.push(this);}
@@ -34,7 +34,7 @@ function protocol({hold=false,completedDepth=13}={}) {
   const createEngine=(hash)=>{const engine=new StockfishEngine(Worker,{engineId:'lite',hash,threads:1});engines.push(engine);return engine;};
   return {workers,engines,createEngine};
 }
-const configured=(settings,depth)=>({performance:normalizePerformance(settings,8,16),depth});
+const configured=(settings,depth,cores=16)=>({performance:normalizePerformance(settings,availableReviewWorkers(cores).at(-1),cores),depth});
 async function runReview(bus,configuration,extra={}) {
   const {performance,depth}=configuration,key=analysisKey('lite',depth,performance,'game');
   const outcome=await reviewGame(game,{concurrency:performance.threads,createEngine:()=>bus.createEngine(performance.hash),
@@ -43,7 +43,7 @@ async function runReview(bus,configuration,extra={}) {
   return {...outcome,key};
 }
 
-test('configured whole-game jobs reach actual UCI budgets while parallel tasks remain single-thread workers',async()=>{
+test('configured whole-game jobs finish requested UCI depths while parallel tasks remain single-thread workers',async()=>{
   const bus=protocol(),configuration=configured({threadMode:'manual',threads:3,hash:128,movetime:3000,multipv:5,reviewMode:'precise'},20);
   const outcome=await runReview(bus,configuration);
   assert.equal(bus.workers.length,3);assert.equal(outcome.analyzed,3);assert.equal(outcome.reviewed,2);
@@ -55,31 +55,70 @@ test('configured whole-game jobs reach actual UCI budgets while parallel tasks r
   }
   const commands=bus.workers.flatMap(worker=>worker.commands),source=commands.filter(command=>command.startsWith('go ')&&!command.includes('searchmoves')),
     restricted=commands.filter(command=>command.includes('searchmoves'));
-  assert.equal(source.length,3);assert.ok(source.every(command=>command==='go depth 20 movetime 3000'));
-  assert.equal(restricted.length,2);assert.ok(restricted.every(command=>command.startsWith('go depth 13 movetime 3000 searchmoves ')));
+  assert.equal(source.length,3);assert.ok(source.every(command=>command==='go depth 20'));
+  assert.equal(restricted.length,2);assert.ok(restricted.every(command=>command.startsWith('go depth 20 searchmoves ')));
+  assert.equal(commands.some(command=>command.startsWith('go ')&&command.includes('movetime')),false);
   assert.ok(commands.includes('setoption name MultiPV value 2'));assert.ok(commands.includes('setoption name MultiPV value 1'));
   for(let index=1;index<=game.moves.length;index++){
     const before=outcome.results.get(index-1),after=outcome.results.get(index);
     assert.ok(hasMoveReview(before,after,game.moves[index-1]));assert.equal(after.moveReview.depth,before.depth);
-    assert.equal(before.configKey,outcome.key);assert.equal(before.requestedDepth,20);
+    assert.equal(before.configKey,outcome.key);assert.equal(before.requestedDepth,20);assert.equal(before.depth,20);
   }
 });
 
 test('changed applied settings miss prior game cache and preserve full candidates for explicit position analysis',async()=>{
   const oldBus=protocol(),oldConfiguration=configured({threadMode:'manual',threads:1,hash:32,movetime:500,multipv:3,reviewMode:'fast'},12);
   const old=await runReview(oldBus,oldConfiguration),saved=structuredClone([...old.results]);
-  assert.ok(oldBus.workers[0].commands.includes('go depth 12 movetime 250'));
+  assert.ok(oldBus.workers[0].commands.includes('go depth 10'));
   const bus=protocol(),configuration=configured({threadMode:'manual',threads:3,hash:128,movetime:10000,multipv:5,reviewMode:'precise'},24);
   const next=await runReview(bus,configuration,{results:old.results});
   assert.notEqual(old.key,next.key);assert.equal(next.analyzed,3);assert.equal(next.reviewed,2);assert.deepEqual([...old.results],saved);
   for(const worker of bus.workers){assert.ok(worker.commands.includes('setoption name Hash value 128'));
-    assert.ok(worker.commands.some(command=>command==='go depth 24 movetime 10000'));}
+    assert.ok(worker.commands.some(command=>command==='go depth 24'));}
   const positionBus=protocol(),engine=positionBus.createEngine(configuration.performance.hash);
   try{await engine.ready;await engine.analyze(new Chess(),searchOptions(24,configuration.performance));
     const commands=positionBus.workers[0].commands;
-    assert.ok(commands.includes('setoption name MultiPV value 5'));assert.ok(commands.includes('go depth 24 movetime 10000'));
+    assert.ok(commands.includes('setoption name MultiPV value 5'));assert.ok(commands.includes('go depth 24'));
     assert.equal(positionBus.workers.length,1);assert.equal(commands.some(command=>command.startsWith('setoption name Threads')),false);
   }finally{engine.dispose();}
+});
+
+test('changing parallel task count reuses completed fixed-depth evaluations and comparisons',async()=>{
+  const configuration=configured({threadMode:'manual',threads:1,hash:32,movetime:500,multipv:3},16);
+  const firstBus=protocol(),first=await runReview(firstBus,configuration),saved=structuredClone([...first.results]);
+  for(const threads of [2,3,6,8]){
+    const bus=protocol(),nextConfiguration=configured({...configuration.performance,threadMode:'manual',threads,movetime:30000},16);
+    const next=await runReview(bus,nextConfiguration,{results:first.results});
+    assert.equal(next.key,first.key);assert.equal(next.analyzed,0);assert.equal(next.reviewed,0);
+    assert.equal(bus.workers.length,0,'a scheduling-only change does not launch replacement searches');
+    assert.deepEqual([...next.results],saved);assert.deepEqual([...first.results],saved);
+  }
+});
+
+test('fresh one-worker and parallel reviews perform the same requested searches and return identical results',async()=>{
+  const configurations=[1,2,3].map(threads=>configured({threadMode:'manual',threads,hash:32,multipv:3},16));
+  const runs=[];
+  for(const configuration of configurations){
+    const bus=protocol(),outcome=await runReview(bus,configuration);
+    const searches=bus.workers.flatMap(worker=>worker.commands.filter(command=>command.startsWith('go '))).sort();
+    runs.push({outcome,searches});
+    assert.equal(outcome.analyzed,3);assert.equal(outcome.reviewed,2);
+    assert.ok([...outcome.results.values()].every(result=>result.depth===16));
+  }
+  for(const run of runs.slice(1)){
+    assert.deepEqual(run.searches,runs[0].searches);
+    assert.deepEqual([...run.outcome.results].sort(([a],[b])=>a-b),[...runs[0].outcome.results].sort(([a],[b])=>a-b));
+  }
+});
+
+test('restored settings never launch review work beyond half of detected logical cores',async()=>{
+  for(const cores of [1,2,3,4,6,8]){
+    const configuration=configured({threadMode:'manual',threads:8},16,cores),maximum=Math.max(1,Math.floor(cores/2));
+    assert.equal(configuration.performance.threads,maximum);
+    const bus=protocol(),outcome=await runReview(bus,configuration);
+    assert.ok(bus.workers.length<=maximum);assert.equal(outcome.analyzed,3);assert.equal(outcome.reviewed,2);
+    assert.ok(bus.workers.every(worker=>worker.commands.every(command=>!command.startsWith('setoption name Threads'))));
+  }
 });
 
 test('aborting a configured review disposes real engine protocol workers and prevents late results from publication',async()=>{

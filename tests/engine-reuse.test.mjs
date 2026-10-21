@@ -25,18 +25,19 @@ async function withEngine(run) {
 const started = () => new Promise(setImmediate);
 const info = (depth, rank, score, pv) => `info depth ${depth} multipv ${rank} score cp ${score} pv ${pv}`;
 
-test('fast overview has a separate bounded budget while detailed searches retain user settings',()=>{
-  assert.deepEqual(reviewOptions(16,{...DEFAULT_PERFORMANCE,reviewMode:'fast'}),{depth:16,movetime:600,multipv:2,hash:32,threads:1});
+test('fast overview explicitly lowers fixed depth while detailed searches retain requested depth',()=>{
+  assert.deepEqual(reviewOptions(16,{...DEFAULT_PERFORMANCE,reviewMode:'fast'}),{depth:14,searchMode:'depth',multipv:2,hash:32,threads:1});
   const custom={...DEFAULT_PERFORMANCE,reviewMode:'fast',movetime:30000,multipv:5};
-  assert.equal(reviewOptions(24,custom).movetime,1500);
-  assert.equal(searchOptions(24,custom).movetime,30000);
+  assert.deepEqual(reviewOptions(24,custom),{depth:22,searchMode:'depth',multipv:2,hash:32,threads:1});
+  assert.deepEqual(searchOptions(24,custom),{depth:24,searchMode:'depth',multipv:5,hash:32,threads:1});
   assert.deepEqual(reviewOptions(24,{...custom,reviewMode:'precise'}),searchOptions(24,custom));
+  assert.equal(reviewOptions(8,custom).depth,8);
 });
 
 test('resolved automatic and manual parallel task counts reach both review and position search options',()=>{
   const automatic=normalizePerformance({threadMode:'auto',reviewMode:'fast'},6,16);
   assert.equal(automatic.threads,6);assert.equal(automatic.threadMode,'auto');
-  assert.deepEqual(reviewOptions(16,automatic),{depth:16,movetime:600,multipv:2,hash:32,threads:6});
+  assert.deepEqual(reviewOptions(16,automatic),{depth:14,searchMode:'depth',multipv:2,hash:32,threads:6});
   const manual=normalizePerformance({threadMode:'manual',threads:5,reviewMode:'precise'},6,16);
   assert.equal(searchOptions(20,manual).threads,5);assert.equal(reviewOptions(20,manual).threads,5);
 });

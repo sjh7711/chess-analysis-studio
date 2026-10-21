@@ -24,6 +24,9 @@ export async function reviewGame(game, {concurrency=1, createEngine, signal,
         await worker.reset?.();
         jobSignal.throwIfAborted();
         const result=await worker.analyze(gameAt(game,index),options);
+        if(options.searchMode==='depth'&&!result.terminal
+          &&(result.searchMode!=='depth'||!result.multipvComplete||result.depth!==options.depth))
+          throw new Error('설정한 깊이를 완료하지 않은 국면은 리뷰에 저장할 수 없습니다.');
         return {...result,requestedDepth:options.depth,configKey,overview};
       },
       onResult:(result,_,index)=>{analyzed++;return publish(result,index,'position');},

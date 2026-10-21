@@ -41,6 +41,7 @@ export class StockfishEngine {
     this.initialized = false;
     this.searchGeneration = 0;
     this.idle = Promise.resolve();
+    this.searchQueue = Promise.resolve();
     this.closed = false;
     this.abort = new AbortController();
     this.ready = new Promise((resolve, reject) => {
@@ -105,7 +106,19 @@ export class StockfishEngine {
       this.send('isready');
     });
   }
-  async analyze(chess, { depth = 16, movetime = 1200, multipv = 3, searchMoves, onInfo } = {}) {
+  analyze(chess, options = {}) {
+    const generation=this.searchGeneration;
+    const task=this.searchQueue.catch(()=>{}).then(async()=>{
+      if(this.closed || generation!==this.searchGeneration)throw new DOMException('Cancelled','AbortError');
+      // Reset and search share one queue reservation, so another queued search
+      // cannot reset early and then inherit this one's transposition table.
+      if(options.searchMode==='depth')await this.reset();
+      return this.search(chess,options);
+    });
+    this.searchQueue=task.catch(()=>{});
+    return task;
+  }
+  async search(chess, { depth = 16, movetime = 1200, multipv = 3, searchMoves, onInfo, searchMode } = {}) {
     const generation = this.searchGeneration;
     await this.ready;
     for (;;) {
@@ -115,6 +128,7 @@ export class StockfishEngine {
       if (idle === this.idle) break;
     }
     if (this.pending) throw new Error('An engine search is already running.');
+    if(searchMode==='depth' && (!Number.isInteger(depth)||depth<1||depth>128))throw new Error('유효한 탐색 깊이가 필요합니다.');
     if (!Number.isInteger(multipv) || multipv < 1) throw new Error('후보 수는 1 이상의 정수여야 합니다.');
     const legalMoves = new Set(chess.moves({ verbose: true }).map(uciMove));
     let roots;
@@ -129,12 +143,15 @@ export class StockfishEngine {
     const rootMoves = roots ? new Set(roots) : legalMoves;
     const candidateCount = Math.min(multipv, rootMoves.size);
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => this.fail(new Error('분석 시간이 초과되었습니다. 다시 시도해 주세요.')), movetime + 15000);
+      // A watchdog is a failed job, never a lower-depth completed evaluation.
+      // It does not publish partial scores when the device cannot finish.
+      const timeout=searchMode==='depth'?(depth>=24?600000:depth>=20?300000:180000):movetime+15000;
+      const timer = setTimeout(() => this.fail(new Error('분석을 완료하지 못했습니다. 깊이를 낮추거나 다시 시도해 주세요.')), timeout);
       this.idle = new Promise(done => { this.resolveIdle = done; });
-      this.pending = { resolve, reject, timer, turn: chess.turn(), rootMoves, multipv: candidateCount, iterations: new Map(), rootLines: new Map(), completed: null, onInfo, cancelled: false };
+      this.pending = { resolve, reject, timer, turn: chess.turn(), rootMoves, multipv: candidateCount, iterations: new Map(), rootLines: new Map(), completed: null, onInfo, cancelled: false, searchMode, requestedDepth:depth };
       this.send(`setoption name MultiPV value ${candidateCount}`);
       this.send(positionCommand(chess));
-      this.send(`go depth ${depth} movetime ${movetime}${roots ? ` searchmoves ${roots.join(' ')}` : ''}`);
+      this.send(`go depth ${depth}${searchMode==='depth'?'':` movetime ${movetime}`}${roots ? ` searchmoves ${roots.join(' ')}` : ''}`);
     });
   }
   handleLine(line) {
@@ -151,7 +168,17 @@ export class StockfishEngine {
       this.resolveIdle?.();
       this.resolveIdle = null;
       if (pending.cancelled) return;
-      try { pending.resolve(finalResult(pending, line.trim().split(/\s+/)[1])); }
+      try {
+        const result=finalResult(pending,line.trim().split(/\s+/)[1]);
+        if(pending.searchMode==='depth'){
+          if(!result.multipvComplete || result.depth!==pending.requestedDepth){
+            const error=new Error('설정한 깊이의 분석을 완료하지 못했습니다. 다시 시도해 주세요.');
+            error.code='INCOMPLETE_DEPTH';throw error;
+          }
+          result.searchMode='depth';result.requestedDepth=pending.requestedDepth;
+        }
+        pending.resolve(result);
+      }
       catch (error) { pending.reject(error); }
     }
   }

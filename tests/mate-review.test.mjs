@@ -78,3 +78,70 @@ test('a primary PV change invalidates cached evidence and requests fresh proof',
 test('depth cap skips searches that cannot meet the required two-depth gain',async()=>{
   const f=fixture({depth:21}),engine=engineFor(f.proof);assert.equal(needsMateReview(f.before,f.after,f.move,f.chess),false);const after=await reviewMove(engine,f.chess,f.before,f.after,f.move);assert.equal(engine.calls.length,0);assert.deepEqual(after,f.after);
 });
+
+function depthFixture(settings={}) {
+  const value=fixture(settings);
+  value.before.searchMode='depth';value.after.searchMode='depth';value.proof.searchMode='depth';
+  return value;
+}
+
+test('fixed-depth mate confidence completes its target and binds a null time limit without altering primary inputs',async()=>{
+  for(const color of ['w','b']) {
+    const f=depthFixture({color,history:color==='w'}),engine=engineFor(f.proof);
+    const original=JSON.stringify({before:f.before,after:f.after,proof:f.proof,move:f.move,history:f.chess.history()});
+    const after=await reviewMove(engine,f.chess,f.before,f.after,f.move,{searchMode:'depth',depth:16,movetime:1,multipv:5,hash:64});
+    assert.deepEqual(engine.calls.map(call=>call.kind),['reset','analyze']);
+    assert.deepEqual(engine.calls[1].options,{searchMode:'depth',depth:8,multipv:1,hash:64,searchMoves:[uciMove(f.move)]});
+    assert.equal(engine.calls[1].fen,f.move.before);assert.deepEqual(engine.calls[1].history,f.chess.history());
+    const record=after.moveReview.mateReview;
+    assert.equal(record.searchMode,'depth');assert.equal(record.movetime,null);assert.equal(record.status,'complete');
+    assert.equal(record.result.searchMode,'depth');assert.equal(record.result.depth,record.requestedDepth);
+    assert.equal(hasMateReview(f.before,after,f.move,f.chess),true);
+    assert.deepEqual(validatedMateReview(f.before,after,f.move,f.chess),f.proof);
+    assert.deepEqual(stripProof(after),f.after);
+    assert.equal(JSON.stringify({before:f.before,after:f.after,proof:f.proof,move:f.move,history:f.chess.history()}),original);
+  }
+});
+
+test('fixed-depth mate confidence cannot cache a failure, partial depth, foreign mode or invalid mating evidence',async()=>{
+  const cases=[
+    proof=>{throw new Error('confidence worker unavailable');},
+    proof=>{proof.depth-=2;proof.lines[0].depth=proof.depth;},
+    proof=>{proof.multipvComplete=false;},
+    proof=>{delete proof.searchMode;},
+    proof=>{proof.searchMode='time';},
+    proof=>{proof.lines[0].pv[2]='a9a8';},
+    proof=>{proof.score.value++;proof.lines[0].score.value++;},
+    proof=>{proof.bestmove='a6a7';},
+  ];
+  for(const mutate of cases) {
+    const f=depthFixture(),original=JSON.stringify({before:f.before,after:f.after,proof:f.proof,history:f.chess.history()});
+    const engine={async reset(){},async analyze(chess,options){
+      assert.equal(options.searchMode,'depth');assert.equal('movetime' in options,false);
+      const proof=structuredClone(f.proof);mutate(proof);return proof;
+    }};
+    await assert.rejects(reviewMove(engine,f.chess,f.before,f.after,f.move,{searchMode:'depth'}));
+    assert.equal(f.after.moveReview.mateReview,undefined);
+    assert.equal(needsMateReview(f.before,f.after,f.move,f.chess),true);
+    assert.equal(JSON.stringify({before:f.before,after:f.after,proof:f.proof,history:f.chess.history()}),original);
+  }
+});
+
+test('fixed-depth mate proof bindings reject timed, incomplete and changed root policies even after a cache hit',async()=>{
+  const mutations=[
+    (record,f)=>{record.movetime=1200;},(record,f)=>{delete record.movetime;},
+    (record,f)=>{delete record.searchMode;},(record,f)=>{delete record.result.searchMode;},
+    (record,f)=>{record.status='unverified';record.result=null;},
+    (record,f)=>{record.result.depth=record.minimumDepth;record.result.lines[0].depth=record.minimumDepth;},
+    (record,f)=>{delete f.before.searchMode;},
+  ];
+  for(const mutate of mutations) {
+    const f=depthFixture(),after=await reviewMove(engineFor(f.proof),f.chess,f.before,f.after,f.move,{searchMode:'depth'});
+    assert.equal(hasMateReview(f.before,after,f.move,f.chess),true);
+    assert.deepEqual(validatedMateReview(f.before,after,f.move,f.chess),f.proof);
+    mutate(after.moveReview.mateReview,f);
+    assert.equal(hasMateReview(f.before,after,f.move,f.chess),false);
+    assert.equal(validatedMateReview(f.before,after,f.move,f.chess),null);
+    assert.equal(needsMateReview(f.before,after,f.move,f.chess),true);
+  }
+});

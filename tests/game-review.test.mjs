@@ -172,3 +172,43 @@ test('cancellation during a reset never starts its stale position search', async
   await turn(); assert.equal(resetStarted, true); controller.abort(); reset.resolve(); await rejected;
   assert.equal(searches, 0); assert.equal(disposed, 1);
 });
+
+test('fixed-depth game review never publishes a partial or foreign-policy source position',async()=>{
+  for(const mutate of [result=>{result.depth--;},result=>{result.multipvComplete=false;},result=>{delete result.searchMode;}]) {
+    const events=[],saved=new Map(),snapshot=JSON.stringify([...saved]);let calls=0,disposed=0;
+    const worker={async reset(){},async analyze(chess,settings){
+      calls++;assert.equal(settings.searchMode,'depth');
+      const result={searchMode:'depth',score:cp(20),depth:10,bestmove:'e2e4',multipvComplete:true,
+        lines:[{multipv:1,score:cp(20),depth:10,pv:['e2e4']} ]};
+      mutate(result);return result;
+    },cancel(){},dispose(){disposed++;}};
+    await assert.rejects(reviewGame(game,{concurrency:1,createEngine:()=>worker,results:saved,
+      options:{searchMode:'depth',depth:10,multipv:1},configKey:'synthetic-fixed-policy',
+      onResult:(result,index,phase)=>events.push({result,index,phase})}));
+    assert.deepEqual(events,[]);assert.equal(calls,1);assert.equal(disposed,1);
+    assert.equal(JSON.stringify([...saved]),snapshot,'a failed source cannot become a resumable cache entry');
+  }
+});
+
+test('a failed fixed-depth confidence search does not publish a reviewed move or mutate source cache',async()=>{
+  const fixedGame=parseGame('1. a3 *'),saved=new Map(),events=[],failure=new Error('ranking verification unavailable');
+  let rootSearches=0,disposed=0;
+  const worker={async reset(){},async analyze(chess,settings){
+    assert.equal(settings.searchMode,'depth');assert.equal('movetime' in settings,false);
+    const child=chess.history().length===1;
+    if(settings.searchMoves)return {searchMode:'depth',score:cp(120),depth:10,bestmove:'a2a3',multipvComplete:true,
+      lines:[{multipv:1,score:cp(120),depth:10,pv:['a2a3','a7a6']}]};
+    if(!child&&++rootSearches>1)throw failure;
+    const score=cp(child?900:100),bestmove=child?'a7a6':'b1c3',second=child?'h7h6':'g1f3';
+    return {searchMode:'depth',score,depth:10,bestmove,multipvComplete:true,
+      lines:[{multipv:1,score:{...score},depth:10,pv:child?[bestmove]:[bestmove,'a7a6']},
+        {multipv:2,score:cp(child?890:80),depth:10,pv:[second]}]};
+  },cancel(){},dispose(){disposed++;}};
+  const settings={searchMode:'depth',depth:10,multipv:2};
+  await assert.rejects(reviewGame(fixedGame,{concurrency:1,createEngine:()=>worker,results:saved,
+    options:settings,comparisonOptions:settings,configKey:'synthetic-fixed-confidence',
+    onResult:(result,index,phase)=>events.push({result,index,phase})}),error=>error===failure);
+  assert.deepEqual(events.map(event=>[event.index,event.phase]),[[0,'position'],[1,'position']]);
+  assert.ok(events.every(event=>event.result.moveReview===undefined),'an incomplete confidence job cannot publish a grade input');
+  assert.equal(saved.size,0);assert.equal(disposed,1);
+});
