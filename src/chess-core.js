@@ -131,7 +131,7 @@ export const GRADING_BASIS = [
   'Chess.com 공개 예상 승점 감소 구간: 우수한 수 0~2%p, 좋은 수 2~5%p, 부정확 5~10%p, 실수 10~20%p, 블런더 20%p 이상. 최선의 수는 엔진 1순위 또는 같은 완료 깊이에서 동일한 평가를 받은 후보입니다.',
   '이 앱은 경계값부터 다음 등급을 적용하며, 예상 승점 환산·특수 분류·승점이 포화된 국면의 전술 손실 보정은 자체 추정입니다. 최선보다 추가 주요 기물 손실이 검증되면 실수로 분류합니다. 이미 불리한 국면에서 나이트·비숍 이상의 추가 손실을 판정하려면 실제 이력과 두 예상 수순을 검증하고, 모든 합법 대응에서도 손실이 남는지 확인합니다. 같은 쪽의 메이트로 끝나는 두 수순에서도 완결된 승자·거리와 별도 기물 손실을 확인합니다.',
   '피할 수 있었던 상대의 즉시 메이트·체크 시작 메이트2 허용과, 모든 방어가 증명된 짧은 메이트 기회 누락은 별도 분류합니다. 자기 즉시 메이트를 놓치면 놓친 기회로 분류하되, 체크 후 상대의 유일한 합법 응수에 다음 수로 끝내는 수순이 검증되면 예외로 합니다.',
-  '체크·포획·승격이 아닌 수로 메이트2를 메이트4 이상으로 늦춘 경우에는, 최선수의 모든 방어가 메이트로 끝나고 실전 수에는 즉시 마무리에서 벗어나는 방어가 있는지 확인합니다. 같은 승자의 실전 제한검색과 수후 검색 모두 완결된 메이트를 제시해야 합니다. 한 수 더 걸리는 메이트나 연속 체크·교환이라는 이유만으로 이 추가 규칙을 적용하지 않습니다.',
+  '메이트2를 실전 제한검색의 메이트4·수후 검색의 메이트3으로 늦춰도 강제 메이트가 완결된 수순으로 유지되면 좋은 수로 분류합니다. 최선수의 모든 방어와 실전 수의 즉시 마무리 회피를 실제 이력으로 검증합니다. 체크·포획·승격이 아닌 수로 메이트5 이상까지 늦춘 경우에는 같은 검증을 거쳐 놓친 기회로 분류합니다. 한 수 더 걸리는 메이트나 연속 체크·교환이라는 이유만으로 심각한 실수로 분류하지 않습니다.',
   '수전·수후 검색은 같은 승자의 메이트인데 실전 제한검색만 CP인 경우, 실제 이력으로 최소 2단계 더 깊은 별도 검색의 완결 메이트가 확인되면 그 실전 수 평가에만 사용합니다. 이 증거나 실제 이력으로 확인한 안전한 왕·룩 대 왕 국면에서는 조용한 메이트2 기회도 모든 방어를 검증합니다.',
   '왕·룩 대 왕의 안전한 승패가 유지되면 CP와 메이트 표기 차이에서 생긴 손실을 보정합니다. 수비하는 왕의 CP 대 CP 평가 차이는 유지합니다. 원래 국면 점수와 최선 순위는 바꾸지 않습니다. Chess.com의 레이팅별 환산식과 CAPS2 정확도 계산식은 공개되지 않아 동일한 결과를 보장하지 않습니다.',
 ].join(' ');
@@ -864,6 +864,54 @@ function missedOpportunity(before, move, previous, previousMove, previousGrade) 
   return opponentLoss>=0.10 || previousGrade?.key==='miss' && opponentLoss>=0.05;
 }
 
+function freePawnOpportunity(before,after,move,moves,moveIndex) {
+  const review=after?.moveReview,sign=move.color==='w'?1:-1,actual=legalMoveRecord(move);
+  if(move.captured || move.promotion || before.score.type!=='cp' || review?.score?.type!=='cp'
+    || before.score.value*sign<0 || review.score.value*sign>=0 || !hasMoveReview(before,after,move)
+    || !before.multipvComplete || !Number.isInteger(before.depth) || before.depth<1 || review.depth!==before.depth
+    || !['candidate','search'].includes(review.source) || !actual || /[+#]$/.test(actual.san)
+    || !Array.isArray(moves) || !Number.isInteger(moveIndex) || moveIndex<0 || moveIndex>=moves.length
+    || moveIndex>512 || moves[moveIndex]?.before!==move.before || moves[moveIndex]?.after!==move.after
+    || uciMove(moves[moveIndex])!==uciMove(move))return null;
+  const first=before.lines?.find(line=>line.multipv===1 && line.depth===before.depth
+    && line.pv?.[0]===before.bestmove && sameScore(line.score,before.score));
+  if(!first || first.pv.length<6 || review.pv?.length<6 || first.pv.length>64 || review.pv.length>64)return null;
+  try {
+    const root=validatePosition(moves[0]?.before||move.before);
+    for(const step of moves.slice(0,moveIndex)) {
+      if(root.isGameOver() || root.fen()!==step.before || root.move(uciMove(step)).after!==step.after)return null;
+    }
+    if(root.isGameOver() || root.fen()!==move.before)return null;
+    const initial=materialValue(root.fen(),move.color),best=root.move(before.bestmove);
+    // This is a concrete capture opportunity, not a claim that every later
+    // defense loses a pawn. A legal immediate recapture rejects "free".
+    if(best.captured!=='p' || best.promotion || best.flags.includes('e') || root.isGameOver()
+      || root.moves({verbose:true}).some(reply=>reply.captured && reply.to===best.to))return null;
+    root.undo();
+    const replay=pv=>{
+      const gains=[];
+      for(const uci of pv) {
+        if(root.isGameOver())throw Error('A terminal line cannot prove a capture opportunity.');
+        const step=root.move(uci);
+        if(uciMove(step)!==uci || step.promotion || step.flags.includes('e'))throw Error('Unsupported capture continuation.');
+        gains.push(materialValue(root.fen(),move.color)-initial);
+      }
+      for(const _ of gains)root.undo();
+      return gains;
+    };
+    const bestGains=replay(first.pv),playedGains=replay(review.pv);
+    // Both the recorded six-ply example and the full recorded endpoint must
+    // retain the difference; a transient capture or equal compensation is
+    // insufficient to relabel an ordinary positional mistake.
+    if(bestGains[5]<1 || playedGains[5]>=1 || bestGains.at(-1)<1 || playedGains.at(-1)>=1
+      || bestGains.at(-1)-playedGains.at(-1)<1)return null;
+    return {version:1,kind:'missed-free-pawn',fen:move.before,uci:uciMove(move),configKey:before.configKey,
+      beforeDepth:before.depth,first:before.bestmove,square:best.to,
+      best:{samplePlies:6,gain:bestGains[5],finalGain:bestGains.at(-1)},
+      played:{samplePlies:6,gain:playedGains[5],finalGain:playedGains.at(-1)}};
+  } catch {return null;}
+}
+
 function childSearchContradictsGreat(before,after,move) {
   // A separate child score does not replace the bound root comparison. It can
   // only withhold a special award when a completed, equally deep search gives
@@ -918,14 +966,16 @@ function shortMateEvidence(before,after,move,moves,moveIndex,signature) {
     ?validatedMateReview(before,after,move,{moves,moveIndex}):null;
   const elementaryMate=before.score.type==='mate' && before.score.winner===move.color
     && elementaryEndgameEvidence(move,{moves,moveIndex});
-  // An extra forcing move can be a natural finish. This additional rule only
-  // considers a nonchecking, noncapturing, nonpromoting move that extends a
-  // certified mate in two by at least two attacking turns. It still requires
-  // every best-line defense and an actual escape from a next-turn finish.
+  // A modest delay can retain a sound forcing finish. Distinguish a complete
+  // root M4 / independent child M3 from a longer quiet loss of a short finish;
+  // neither nominal distances nor a selected PV alone establish the proof.
+  const retainedMate=before.score.type==='mate' && before.score.winner===winner && Math.abs(before.score.value)===2
+    && review?.score?.type==='mate' && review.score.winner===winner && Math.abs(review.score.value)===4
+    && after.score.type==='mate' && after.score.winner===winner && Math.abs(after.score.value)===3;
   const directLongerMate=before.score.type==='mate' && before.score.winner===winner && Math.abs(before.score.value)===2
     && review?.score?.type==='mate' && review.score.winner===winner && Math.abs(review.score.value)>=4
     && after.score.type==='mate' && after.score.winner===winner && Math.abs(after.score.value)>=3
-    && !move.captured && !move.promotion && !legalMoveRecord(move)?.san.endsWith('+');
+    && (retainedMate || !move.captured && !move.promotion && !legalMoveRecord(move)?.san.endsWith('+'));
   const extendedMate=directLongerMate || confirmedLonger && Math.abs(confirmedLonger.score.value)>=3 || elementaryMate;
   const missesMate=before.score.type==='mate' && before.score.winner===winner
     && before.score.value===(winner==='w'?2:-2) && (review?.score?.type==='cp' || directLongerMate)
@@ -996,7 +1046,7 @@ function shortMateEvidence(before,after,move,moves,moveIndex,signature) {
         const childRoot=root();childRoot.move(uciMove(move));
         if(!provesMate(playedMateBranch(childRoot,child.pv),after.score,winner))return null;
       }
-      return {version:1,kind:'missed-verified-mate-in-two',first:before.bestmove,certificates,escapingDefense:uciMove(escape),checkingStart};
+      return {version:1,kind:retainedMate?'retained-verified-mate-in-two':'missed-verified-mate-in-two',first:before.bestmove,certificates,escapingDefense:uciMove(escape),checkingStart};
     } catch { return null; }
   })();
   shortMateEvidenceCache.set(move,{before,after,moves,moveIndex,signature,historySignature,result});
@@ -1019,13 +1069,18 @@ export function classifyMove(before, after, move, {previous,previousMove,previou
   // Bind its positive and negative cache entries to that history as well as
   // to the engine score/PV signature, including in-place exploration edits.
   const captureHistory=materialLossScope(before,after.moveReview,move)
-    && Array.isArray(moves) && Number.isInteger(moveIndex) && moveIndex>=0 && moveIndex<=512
+    && Array.isArray(moves) && Number.isInteger(moveIndex) && moveIndex>=0 && moveIndex<moves.length && moveIndex<=512
+    ?JSON.stringify(moves.slice(0,moveIndex+1).map(step=>step?[step.before,step.after,step.from,step.to,step.promotion]:null)):null;
+  const opportunityHistory=before.score.type==='cp' && after.moveReview?.score?.type==='cp'
+    && before.score.value*(move.color==='w'?1:-1)>=0 && after.moveReview.score.value*(move.color==='w'?1:-1)<0
+    && Array.isArray(moves) && Number.isInteger(moveIndex) && moveIndex>=0 && moveIndex<moves.length && moveIndex<=512
     ?JSON.stringify(moves.slice(0,moveIndex+1).map(step=>step?[step.before,step.after,step.from,step.to,step.promotion]:null)):null;
   const cached = gradeCache.get(move);
   if (cached?.before===before && cached.after===after && cached.previous===previous
     && cached.previousMove===previousMove && cached.previousGrade===previousGrade && cached.recapture===recapture
     && cached.mateMiss===mateMiss && cached.candidate===candidate && cached.shortMate===shortMate
     && cached.mateProof===mateProof && cached.endgameEvidence===endgameEvidence && cached.captureHistory===captureHistory
+    && cached.opportunityHistory===opportunityHistory
     && cached.signature===signature) return cached.grade;
   const assessed=assessedMoveResult(before,after,move,{moves,moveIndex});
   // The KRK theorem proves the outcome, not that all defensive choices have
@@ -1068,8 +1123,9 @@ export function classifyMove(before, after, move, {previous,previousMove,previou
   }
   const mateEvidence=!['miss','mistake','blunder'].includes(key)?shortMate:null;
   if(mateEvidence) {
-    key=mateEvidence.kind.startsWith('allowed-mate')?'mistake':'miss';severity=Math.max(2,severity);
-    reason=key==='mistake'?(mateEvidence.kind==='allowed-mate-in-one'?'다른 수로 피할 수 있었던 상대의 한 수 체크메이트를 허용했습니다.'
+    const retained=mateEvidence.kind==='retained-verified-mate-in-two';
+    key=retained?'good':mateEvidence.kind.startsWith('allowed-mate')?'mistake':'miss';severity=retained?0:Math.max(2,severity);
+    reason=retained?'강제 체크메이트는 유지했지만, 더 빠르게 끝낼 수 있는 수가 있었습니다.':key==='mistake'?(mateEvidence.kind==='allowed-mate-in-one'?'다른 수로 피할 수 있었던 상대의 한 수 체크메이트를 허용했습니다.'
       :'다른 수로 피할 수 있었지만, 상대가 체크로 시작해 모든 합법 응수에 다음 수로 메이트할 수 있게 했습니다.')
       :mateEvidence.checkingStart===false?'상대의 모든 합법 응수에 다음 수로 메이트할 수 있었지만, 그 마무리를 놓쳤습니다.'
         :'체크로 시작해 상대의 모든 합법 응수에 다음 수로 메이트할 수 있었지만, 그 마무리를 놓쳤습니다.';
@@ -1079,8 +1135,12 @@ export function classifyMove(before, after, move, {previous,previousMove,previou
     key='mistake';severity=Math.max(2,severity);
     reason=`가까운 예상 교환에서 최선의 수보다 기물 점수를 ${tacticalLoss.additional}점 더 내줄 수 있습니다.`;
   }
-  const grade={key,...MOVE_GRADES[key],loss,pointsLoss,severity,reason,...(endgameEvidence?{endgameEvidence}:{}),...(mateEvidence?{mateEvidence}:{}),...(tacticalLoss?{tacticalLoss}:{})};
-  gradeCache.set(move,{before,after,previous,previousMove,previousGrade,recapture,mateMiss,candidate,shortMate,mateProof,endgameEvidence,captureHistory,signature,grade});
+  const opportunityEvidence=key==='mistake'?freePawnOpportunity(before,after,move,moves,moveIndex):null;
+  if(opportunityEvidence) {
+    key='miss';reason=`${opportunityEvidence.square}의 폰을 손해 없이 잡을 기회를 놓쳤습니다.`;
+  }
+  const grade={key,...MOVE_GRADES[key],loss,pointsLoss,severity,reason,...(endgameEvidence?{endgameEvidence}:{}),...(mateEvidence?{mateEvidence}:{}),...(tacticalLoss?{tacticalLoss}:{}),...(opportunityEvidence?{opportunityEvidence}:{})};
+  gradeCache.set(move,{before,after,previous,previousMove,previousGrade,recapture,mateMiss,candidate,shortMate,mateProof,endgameEvidence,captureHistory,opportunityHistory,signature,grade});
   return grade;
 }
 

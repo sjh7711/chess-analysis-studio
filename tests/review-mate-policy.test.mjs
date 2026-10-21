@@ -28,12 +28,62 @@ function fixture({black=false,fen=SETUP,played=quiet5,best=BEST,history=[],allow
 }
 function grade(x){const before=JSON.stringify({move:x.move,before:x.before,after:x.after,context:x.context}),result=classifyMove(x.before,x.after,x.move,x.context);assert.equal(JSON.stringify({move:x.move,before:x.before,after:x.after,context:x.context}),before);return result;}
 
-test('a quiet mate-in-two delay to root mate4/child mate3 or longer is proved for both colors',()=>{
+test('a modest retained mate delay and a longer quiet missed finish are distinguished for both colors',()=>{
   for(const black of [false,true])for(const played of [quiet4,quiet5]){
-    const x=fixture({black,played}),g=grade(x);assert.equal(g.key,'miss');assert.equal(g.mateEvidence.kind,'missed-verified-mate-in-two');assert.equal(g.mateEvidence.checkingStart,false);
+    const x=fixture({black,played}),g=grade(x),retained=played===quiet4;
+    assert.equal(g.key,retained?'good':'miss');assert.equal(g.mateEvidence.kind,retained?'retained-verified-mate-in-two':'missed-verified-mate-in-two');assert.equal(g.mateEvidence.checkingStart,false);
+    assert.equal(g.severity,retained?0:2);
     const best=new Chess(x.move.before);best.move(x.before.bestmove);const defenses=best.moves({verbose:true});assert.equal(defenses.length,g.mateEvidence.certificates.length);
     for(const certificate of g.mateEvidence.certificates){const chess=new Chess(best.fen());chess.move(certificate.reply);assert.equal(chess.move(certificate.finish).san.endsWith('#'),true);}
     const actual=new Chess(x.move.after);actual.move(g.mateEvidence.escapingDefense);assert.equal(actual.moves().some(san=>san.endsWith('#')),false);
+  }
+});
+
+const retainedSetups=[
+  {fen:'7k/8/4K3/4N3/8/4B3/6R1/8 w - - 0 1',best:['e6f7','h8h7','g2h2'],
+    played:['e5f7','h8h7','f7e5','h7h8','e6f7','h8h7','g2h2']},
+  {fen:'8/8/8/5KB1/4N1R1/8/7k/8 w - - 0 1',best:['g5f4','h2h1','e4f2'],
+    played:['g4g3','h2h1','g5e3','h1h2','e3g1','h2h1','e4f2'],
+    child:['h2h1','g5f4','h1h2','g3g4','h2h3','e4f2']},
+];
+
+function retainedFixture(setup,black=false){
+  const x=fixture({...setup,black});
+  if(setup.child)x.after.lines[0].pv=setup.child.map(u=>black?mirrorUci(u):u);
+  return x;
+}
+
+test('checking and quiet five-man finishes retain a good grade with complete independent mate evidence',()=>{
+  for(const black of [false,true])for(const setup of retainedSetups){
+    const x=retainedFixture(setup,black),g=grade(x);
+    assert.equal(g.key,'good');assert.equal(g.severity,0);assert.equal(g.pointsLoss,0);
+    assert.equal(g.mateEvidence.kind,'retained-verified-mate-in-two');
+    assert.match(g.reason,/강제 체크메이트는 유지/);
+    const best=new Chess(x.move.before);best.move(x.before.bestmove);
+    assert.equal(g.mateEvidence.certificates.length,best.moves().length);
+    for(const certificate of g.mateEvidence.certificates){
+      const branch=new Chess(best.fen());branch.move(certificate.reply);
+      assert.equal(branch.move(certificate.finish).san.endsWith('#'),true);
+    }
+    const actual=new Chess(x.move.after);actual.move(g.mateEvidence.escapingDefense);
+    assert.equal(actual.moves().some(san=>san.endsWith('#')),false);
+    assert.equal(x.actual.chess.isCheckmate(),true);
+  }
+});
+
+test('a retained-mate grade requires the bound same-depth sources and both complete matching mating lines',()=>{
+  for(const setup of retainedSetups)for(const change of [
+    x=>{x.before.multipvComplete=false;},x=>{x.after.multipvComplete=false;},
+    x=>{x.after.depth=15;},x=>{x.after.moveReview.depth=15;},
+    x=>{x.after.configKey='unrelated';},x=>{x.after.moveReview.configKey='unrelated';},
+    x=>{x.after.moveReview.source='unverified';},
+    x=>{x.before.lines[0].pv.pop();},x=>{x.after.moveReview.pv.pop();},x=>{x.after.lines[0].pv.pop();},
+    x=>{x.after.score=mate(4,x.winner);x.after.lines[0].score={...x.after.score};},
+    x=>{x.after.score=mate(3,x.winner==='w'?'b':'w');x.after.lines[0].score={...x.after.score};},
+    x=>{x.context.moves[0]={...x.move,after:x.move.before};},
+  ]){
+    const x=retainedFixture(setup);assert.equal(grade(x).key,'good');change(x);
+    assert.notEqual(grade(x).mateEvidence?.kind,'retained-verified-mate-in-two');
   }
 });
 
