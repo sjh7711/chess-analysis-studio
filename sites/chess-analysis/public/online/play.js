@@ -190,6 +190,7 @@ function showHistory(ply){
 }
 function renderRequest(){
   const r=game.request;
+  for(const id of ['request-panel','result-undo-panel'])$(id).classList.toggle('incoming-request',!!r&&!r.mine);
   $('request-panel').dataset.requestId=r?.id||'';
   $('request-panel').hidden=!r;
   $('result-undo-panel').hidden=game.status!=='finished'||r?.kind!=='undo';

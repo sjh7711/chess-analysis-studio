@@ -90,7 +90,7 @@ function mountInvitations() {
     for (const invitation of inbox.invitations) {
       let card = cards.get(invitation.id);
       if (!card) {
-        const node = element('article', 'invitation-card'); node.dataset.invitation = invitation.id;
+        const node = element('article', 'invitation-card incoming-request'); node.dataset.invitation = invitation.id;
         const name = element('strong', 'invitation-name');
         const description = element('p', 'invitation-description', '함께 1대1 대국을 시작할까요?');
         const time = element('p', 'invitation-time');
