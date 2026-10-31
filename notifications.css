@@ -33,13 +33,18 @@
 .invitation-tray[hidden],.invitation-count[hidden],.invitation-message[hidden]{display:none}
 @media(max-width:700px){.invitation-tray{right:16px}}
 
-/* Keep incoming requests noticeable without fading their text or moving the board. */
-.incoming-request{--request-rest:#fff0ed;--request-glow:#ffded5;animation:incoming-request-pulse 3s ease-in-out infinite}
-.invitation-card.incoming-request{--request-rest:#fff5f2}
-html[data-theme="dark"] .incoming-request{--request-rest:#402421;--request-glow:#57352f}
-.incoming-request.covered-alert,.covered-alert .incoming-request{animation-play-state:paused}
-@keyframes incoming-request-pulse{0%,100%{background-color:var(--request-rest)}50%{background-color:var(--request-glow)}}
-@media(prefers-reduced-motion:reduce){.incoming-request{animation:none}}
+/* Pulse the page base behind the board; request cards and board squares stay still. */
+@media(prefers-reduced-motion:no-preference){
+  body:has(#room:not([hidden]) #request-panel.incoming-request:not([hidden]),
+    > #invitation-tray:not([hidden]) .incoming-request,
+    #room:not([hidden]) #invitation-tray:not([hidden]) .incoming-request){
+    animation:incoming-request-backdrop 3s ease-in-out infinite;
+  }
+}
+@keyframes incoming-request-backdrop{
+  0%,100%{background-color:var(--ui-bg,#f5f6f3)}
+  50%{background-color:color-mix(in srgb,var(--ui-bg,#f5f6f3) 86%,var(--ui-accent,#d67460))}
+}
 
 /* The same notification center is available from both pages. */
 .notification-dialog{box-sizing:border-box;width:calc(100% - 32px);max-width:500px;max-height:min(650px,calc(100dvh - 32px));padding:0;border:1px solid #d5dfce;border-radius:14px;background:#fbfcf9;color:#294638;box-shadow:0 24px 80px #173b3438;font:14px/1.6 LocalUI,'Segoe UI',sans-serif;overflow:hidden;text-align:left}
