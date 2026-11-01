@@ -43,7 +43,7 @@
 }
 @keyframes incoming-request-backdrop{
   0%,100%{background-color:var(--ui-bg,#f5f6f3)}
-  50%{background-color:color-mix(in srgb,var(--ui-bg,#f5f6f3) 86%,var(--ui-accent,#d67460))}
+  50%{background-color:color-mix(in srgb,var(--ui-bg,#f5f6f3) 86%,#ef4444 14%)}
 }
 
 /* The same notification center is available from both pages. */
